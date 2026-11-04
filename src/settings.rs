@@ -1,0 +1,157 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+pub const APP_DIR: &str = "FilmoraPlayer";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiLang {
+    Zh,
+    En,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Provider {
+    /// Bilibili Index-Translate, OpenAI-compatible, no key.
+    Bilibili,
+    /// Any OpenAI-compatible endpoint (OpenAI, DeepSeek, Ollama, ...).
+    OpenAiCompatible,
+    /// Whisper's built-in translation, offline, English target only.
+    WhisperToEnglish,
+    /// Transcribe only.
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubMode {
+    Original,
+    Translated,
+    Bilingual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub ui_lang: UiLang,
+    /// mpv `hwdec` value: "auto-safe", "no", "auto-copy", "d3d11va", "nvdec", "videotoolbox", ...
+    pub hwdec: String,
+    pub volume: f64,
+    pub quality: u32,
+    pub model: String,
+    pub source_lang: String,
+    pub target_lang: String,
+    pub provider: Provider,
+    pub openai_base_url: String,
+    pub openai_api_key: String,
+    pub openai_model: String,
+    pub sub_mode: SubMode,
+    pub sub_font_size: f32,
+    /// Download models through hf-mirror.com (faster in mainland China).
+    pub use_mirror: bool,
+    pub live_enabled: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            ui_lang: UiLang::Zh,
+            hwdec: "auto-safe".into(),
+            volume: 100.0,
+            quality: 0,
+            model: "base".into(),
+            source_lang: "auto".into(),
+            target_lang: "zh".into(),
+            provider: Provider::Bilibili,
+            openai_base_url: "https://api.openai.com/v1".into(),
+            openai_api_key: String::new(),
+            openai_model: "gpt-4o-mini".into(),
+            sub_mode: SubMode::Bilingual,
+            sub_font_size: 28.0,
+            use_mirror: false,
+            live_enabled: false,
+        }
+    }
+}
+
+pub fn data_dir() -> PathBuf {
+    let d = dirs::data_dir().unwrap_or_else(std::env::temp_dir).join(APP_DIR);
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+fn settings_path() -> PathBuf {
+    data_dir().join("settings.json")
+}
+
+impl Settings {
+    pub fn load() -> Self {
+        std::fs::read(settings_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+    pub fn save(&self) {
+        if let Ok(b) = serde_json::to_vec_pretty(self) {
+            let _ = std::fs::write(settings_path(), b);
+        }
+    }
+}
+
+/// Hardware decoding choices offered in settings for this platform.
+pub fn hwdec_choices() -> Vec<(&'static str, &'static str)> {
+    #[allow(unused_mut)]
+    let mut v = vec![("auto-safe", "Auto"), ("no", "Off (software)"), ("auto-copy", "Auto (copy-back)")];
+    #[cfg(windows)]
+    v.extend([
+        ("d3d11va", "D3D11VA"),
+        ("d3d11va-copy", "D3D11VA (copy)"),
+        ("nvdec", "NVDEC"),
+        ("nvdec-copy", "NVDEC (copy)"),
+        ("dxva2-copy", "DXVA2 (copy)"),
+    ]);
+    #[cfg(target_os = "macos")]
+    v.extend([("videotoolbox", "VideoToolbox"), ("videotoolbox-copy", "VideoToolbox (copy)")]);
+    v
+}
+
+/// Speech languages Whisper can be told to expect.
+pub const SOURCE_LANGS: &[(&str, &str, &str)] = &[
+    ("auto", "自动检测", "Auto detect"),
+    ("en", "英语", "English"),
+    ("zh", "中文", "Chinese"),
+    ("ja", "日语", "Japanese"),
+    ("ko", "韩语", "Korean"),
+    ("fr", "法语", "French"),
+    ("de", "德语", "German"),
+    ("es", "西班牙语", "Spanish"),
+    ("ru", "俄语", "Russian"),
+    ("pt", "葡萄牙语", "Portuguese"),
+    ("it", "意大利语", "Italian"),
+    ("ar", "阿拉伯语", "Arabic"),
+    ("hi", "印地语", "Hindi"),
+    ("th", "泰语", "Thai"),
+    ("vi", "越南语", "Vietnamese"),
+    ("id", "印尼语", "Indonesian"),
+];
+
+/// Subtitle translation targets: (code, zh label, en label, name used in the prompt).
+pub const TARGET_LANGS: &[(&str, &str, &str, &str)] = &[
+    ("zh", "简体中文", "Chinese (Simplified)", "Simplified Chinese"),
+    ("zh-Hant", "繁體中文", "Chinese (Traditional)", "Traditional Chinese"),
+    ("en", "英语", "English", "English"),
+    ("ja", "日语", "Japanese", "Japanese"),
+    ("ko", "韩语", "Korean", "Korean"),
+    ("fr", "法语", "French", "French"),
+    ("de", "德语", "German", "German"),
+    ("es", "西班牙语", "Spanish", "Spanish"),
+    ("ru", "俄语", "Russian", "Russian"),
+    ("pt", "葡萄牙语", "Portuguese", "Portuguese"),
+    ("it", "意大利语", "Italian", "Italian"),
+    ("ar", "阿拉伯语", "Arabic", "Arabic"),
+    ("th", "泰语", "Thai", "Thai"),
+    ("vi", "越南语", "Vietnamese", "Vietnamese"),
+    ("id", "印尼语", "Indonesian", "Indonesian"),
+];
+
+pub fn target_prompt_name(code: &str) -> &'static str {
+    TARGET_LANGS.iter().find(|t| t.0 == code).map(|t| t.3).unwrap_or("Simplified Chinese")
+}

@@ -1,0 +1,113 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Prebuilt libmpv (full FFmpeg with dav1d/libvpx/libplacebo/libass/libbluray/libarchive,
+      # D3D11VA/NVDEC/DXVA2 hwdec) from shinchiro/mpv-winbuild-cmake.
+      - name: Fetch libmpv (shinchiro)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rel = gh api repos/shinchiro/mpv-winbuild-cmake/releases/latest | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}' } | Select-Object -First 1
+          if (-not $asset) { throw "mpv-dev asset not found in $($rel.tag_name)" }
+          Write-Host "Using $($asset.name)"
+          curl.exe -fL -o mpv-dev.7z $asset.browser_download_url
+          7z x mpv-dev.7z -ompv-dev -y | Out-Null
+          Get-ChildItem mpv-dev
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "dist/FilmoraPlayer"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item target/release/filmora-player.exe "$out/FilmoraPlayer.exe"
+          Copy-Item mpv-dev/libmpv-2.dll $out
+          Copy-Item README.md, THIRD_PARTY.md $out
+          Compress-Archive -Path "$out/*" -DestinationPath dist/FilmoraPlayer-windows-x64-portable.zip -Force
+
+      - name: Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc /DSourceDir="$PWD\dist\FilmoraPlayer" /DOutDir="$PWD\dist" scripts\installer.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            dist/*.zip
+            dist/*.exe
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
+
+      # Homebrew's mpv: full FFmpeg, libplacebo, libass, libbluray, libarchive, VideoToolbox.
+      - name: Install libmpv
+        run: brew install mpv dylibbundler
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Bundle .app and .dmg
+        run: bash scripts/macos-bundle.sh ${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*.dmg
+
+  release:
+    if: github.event_name == 'push'
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('Build {0}', github.run_number) }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          files: artifacts/*
