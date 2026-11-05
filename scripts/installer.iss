@@ -19,7 +19,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 WizardStyle=modern
 
 [Languages]
-Name: "chs"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chs"; MessagesFile: "lang\ChineseSimplified.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
