@@ -37,6 +37,25 @@ pub const REFRESH: &str = "\u{e145}";
 pub const TV: &str = "\u{e195}";
 pub const STOP: &str = "\u{e083}";
 pub const FOLDER: &str = "\u{e0d7}";
+pub const LIST: &str = "\u{e2e2}";
+pub const LIST_ORDERED: &str = "\u{e1d1}";
+pub const REPEAT: &str = "\u{e146}";
+pub const REPEAT_ONE: &str = "\u{e1fd}";
+pub const SHUFFLE: &str = "\u{e15e}";
+pub const PIN: &str = "\u{e259}";
+pub const TIMER: &str = "\u{e1e0}";
+pub const INFO: &str = "\u{e0f9}";
+pub const KEYBOARD: &str = "\u{e284}";
+pub const LINK: &str = "\u{e102}";
+pub const FOLDER_PLUS: &str = "\u{e0d9}";
+pub const FILE_PLUS: &str = "\u{e0c9}";
+pub const SUN: &str = "\u{e178}";
+pub const ROTATE_CW: &str = "\u{e149}";
+pub const FLIP_H: &str = "\u{e6c5}";
+pub const FLIP_V: &str = "\u{e6c6}";
+pub const BOOKMARK: &str = "\u{e060}";
+pub const HISTORY: &str = "\u{e1f5}";
+pub const UNDO: &str = "\u{e2a1}";
 
 pub fn cjk_font_paths() -> &'static [(&'static str, u32)] {
     if cfg!(windows) {

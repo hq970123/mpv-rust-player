@@ -28,6 +28,14 @@ pub enum SubMode {
     Bilingual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoopMode {
+    Off,
+    One,
+    All,
+    Shuffle,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -59,6 +67,12 @@ pub struct Settings {
     pub shot_copy: bool,
     /// Send live / loaded subtitles along when casting.
     pub cast_subs: bool,
+    pub loop_mode: LoopMode,
+    /// Resume files where they were left.
+    pub resume: bool,
+    /// Audio EQ preset: off / bass / treble / vocal / night.
+    pub audio_eq: String,
+    pub audio_norm: bool,
 }
 
 impl Default for Settings {
@@ -85,6 +99,10 @@ impl Default for Settings {
             shot_with_subs: false,
             shot_copy: false,
             cast_subs: true,
+            loop_mode: LoopMode::Off,
+            resume: true,
+            audio_eq: "off".into(),
+            audio_norm: false,
         }
     }
 }
@@ -101,10 +119,7 @@ fn settings_path() -> PathBuf {
 
 impl Settings {
     pub fn load() -> Self {
-        std::fs::read(settings_path())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        std::fs::read(settings_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
     pub fn save(&self) {
         if let Ok(b) = serde_json::to_vec_pretty(self) {
