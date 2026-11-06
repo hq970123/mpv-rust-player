@@ -31,20 +31,15 @@ pub const PIP: &str = "\u{e3af}";
 pub const WIN_MIN: &str = "\u{e11c}";
 pub const WIN_MAX: &str = "\u{e167}";
 pub const WIN_RESTORE: &str = "\u{e09e}";
+pub const CAST: &str = "\u{e066}";
+pub const COPY: &str = "\u{e225}";
+pub const REFRESH: &str = "\u{e145}";
+pub const TV: &str = "\u{e195}";
+pub const STOP: &str = "\u{e083}";
+pub const FOLDER: &str = "\u{e0d7}";
 
-pub fn family() -> FontFamily {
-    FontFamily::Name("icons".into())
-}
-
-pub fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("lucide".into(), std::sync::Arc::new(FontData::from_static(include_bytes!("../assets/lucide.ttf"))));
-    fonts.families.insert(family(), vec!["lucide".into()]);
-
-    // CJK (and Korean) glyphs from the OS so the UI and subtitles can show them.
-    let candidates: &[(&str, u32)] = if cfg!(windows) {
+pub fn cjk_font_paths() -> &'static [(&'static str, u32)] {
+    if cfg!(windows) {
         &[
             ("C:\\Windows\\Fonts\\msyh.ttc", 0),
             ("C:\\Windows\\Fonts\\msyh.ttf", 0),
@@ -66,7 +61,22 @@ pub fn install_fonts(ctx: &egui::Context) {
             ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
             ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0),
         ]
-    };
+    }
+}
+
+pub fn family() -> FontFamily {
+    FontFamily::Name("icons".into())
+}
+
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("lucide".into(), std::sync::Arc::new(FontData::from_static(include_bytes!("../assets/lucide.ttf"))));
+    fonts.families.insert(family(), vec!["lucide".into()]);
+
+    // CJK (and Korean) glyphs from the OS so the UI and subtitles can show them.
+    let candidates = cjk_font_paths();
     for (i, (path, index)) in candidates.iter().enumerate() {
         if let Ok(bytes) = std::fs::read(path) {
             let name = format!("sys{i}");

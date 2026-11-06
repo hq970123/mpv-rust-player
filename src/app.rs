@@ -1,9 +1,11 @@
+use crate::cast::{CastState, Caster, Device};
 use crate::icons as ic;
 use crate::live::{self, Live, Status};
 use crate::models::{self, Downloads};
 use crate::mpv::{Event, Mpv};
 use crate::render::VideoRenderer;
 use crate::settings::{self, Provider, Settings, SubMode, UiLang};
+use crate::shots;
 use crate::APP_NAME;
 use eframe::egui::{
     self, pos2, vec2, Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Key, Margin, Modifiers, Pos2, Rect,
@@ -85,6 +87,7 @@ struct Track {
     codec: String,
     selected: bool,
     external: bool,
+    external_file: String,
 }
 
 impl Track {
@@ -140,6 +143,10 @@ pub struct PlayerApp {
     eof_handled: bool,
     test_result: Arc<Mutex<Option<String>>>,
     controls_hovered: bool,
+    caster: Caster,
+    /// Device we were casting to, so we notice when the session ends.
+    cast_device: Option<Device>,
+    shot_msg: Arc<Mutex<Option<String>>>,
 }
 
 impl PlayerApp {
@@ -173,9 +180,13 @@ impl PlayerApp {
             eof_handled: false,
             test_result: Arc::new(Mutex::new(None)),
             controls_hovered: false,
+            caster: Caster::new(cc.egui_ctx.clone()),
+            cast_device: None,
+            shot_msg: Arc::new(Mutex::new(None)),
         };
         let volume = format!("{}", app.s.volume);
-        let shots = shots_dir().to_string_lossy().to_string();
+        let shots = shots_dir(&app.s).to_string_lossy().to_string();
+        let jpeg_q = app.s.shot_jpeg_quality.to_string();
         let opts: Vec<(&str, &str)> = vec![
             ("vo", "libmpv"),
             ("config", "no"),
@@ -192,6 +203,7 @@ impl PlayerApp {
             ("audio-file-auto", "fuzzy"),
             ("screenshot-directory", &shots),
             ("screenshot-format", "png"),
+            ("screenshot-jpeg-quality", &jpeg_q),
             ("hr-seek", "default"),
             ("ytdl", "no"),
         ];
@@ -345,7 +357,12 @@ impl PlayerApp {
             self.st.aid = aid;
         }
         self.st.sid = m.get("sid").unwrap_or_default();
+        self.pump_cast();
         self.live.shared.set_player_time(self.st.time);
+        let shot_msg = self.shot_msg.lock().unwrap().take();
+        if let Some(msg) = shot_msg {
+            self.toast(msg);
+        }
 
         if self.tracks_polled.elapsed() > Duration::from_secs(2) {
             self.refresh_tracks();
@@ -379,6 +396,7 @@ impl PlayerApp {
                 codec: t["codec"].as_str().unwrap_or("").into(),
                 selected: t["selected"].as_bool().unwrap_or(false),
                 external: t["external"].as_bool().unwrap_or(false),
+                external_file: t["external-filename"].as_str().unwrap_or("").into(),
             })
             .collect();
     }
@@ -432,12 +450,141 @@ impl PlayerApp {
     }
 
     fn seek_abs(&mut self, t: f64, exact: bool) {
+        if self.casting() {
+            let t = t.clamp(0.0, self.st.duration.max(t));
+            self.caster.seek(t);
+            self.st.time = t;
+            self.schedule_live(false, 400);
+            return;
+        }
         let flag = if exact { "absolute+exact" } else { "absolute+keyframes" };
         self.cmd(&["seek", &format!("{t:.3}"), flag]);
     }
 
-    fn snapshot(&mut self) {
-        if self.current.is_none() {
+    fn seek_rel(&mut self, d: f64) {
+        if self.casting() {
+            let t = (self.st.time + d).max(0.0);
+            self.seek_abs(t, true);
+        } else {
+            self.cmd(&["seek", &format!("{d}")]);
+        }
+    }
+
+    fn toggle_pause(&mut self) {
+        if self.casting() {
+            if self.caster.status.state() == CastState::Paused {
+                self.caster.play();
+            } else {
+                self.caster.pause();
+            }
+        } else {
+            self.cmd(&["cycle", "pause"]);
+        }
+    }
+
+    fn set_volume(&mut self, v: f64) {
+        let v = v.clamp(0.0, if self.casting() { 100.0 } else { 150.0 });
+        if self.casting() {
+            self.caster.set_volume(v);
+        } else {
+            self.set("volume", &format!("{v:.0}"));
+            self.set("mute", "no");
+        }
+        self.st.volume = v;
+    }
+
+    // ------------------------------------------------------------ casting
+
+    fn casting(&self) -> bool {
+        self.cast_device.is_some()
+    }
+
+    fn start_cast(&mut self, device: Device) {
+        let Some(path) = self.current.clone() else {
+            self.toast(self.t("请先打开一个视频", "Open a video first"));
+            return;
+        };
+        let sub = if self.s.cast_subs { self.cast_subtitle() } else { None };
+        let pos = self.st.time;
+        self.set("pause", "yes");
+        self.caster.start(device.clone(), path, pos, sub);
+        self.toast(format!("{} {}", self.t("正在连接", "Connecting to"), device.name));
+        self.cast_device = Some(device);
+    }
+
+    fn stop_cast(&mut self, resume: bool) {
+        if self.cast_device.take().is_none() {
+            return;
+        }
+        let pos = self.caster.status.pos();
+        self.caster.stop();
+        self.seek_abs(pos, true);
+        if resume {
+            self.set("pause", "no");
+        }
+        self.schedule_live(false, 300);
+    }
+
+    /// Subtitle to send along: live speech subtitles if any, else a loaded .srt file.
+    fn cast_subtitle(&self) -> Option<Arc<dyn Fn() -> String + Send + Sync>> {
+        if self.s.live_enabled && self.live_available() {
+            let shared = self.live.shared.clone();
+            let (translated, bilingual) = match self.s.sub_mode {
+                SubMode::Original => (false, false),
+                SubMode::Translated => (true, false),
+                SubMode::Bilingual => (true, true),
+            };
+            return Some(Arc::new(move || shared.to_srt(translated, bilingual)));
+        }
+        let file = self
+            .tracks
+            .iter()
+            .find(|t| t.kind == "sub" && t.selected && t.external_file.to_ascii_lowercase().ends_with(".srt"))
+            .map(|t| t.external_file.clone())?;
+        Some(Arc::new(move || {
+            std::fs::read(&file).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+        }))
+    }
+
+    fn pump_cast(&mut self) {
+        let Some(dev) = self.cast_device.clone() else { return };
+        let st = self.caster.status.state();
+        match st {
+            CastState::Error(e) => {
+                self.cast_device = None;
+                self.toast(format!("{} {}: {e}", self.t("投屏失败", "Cast failed"), dev.name));
+                return;
+            }
+            CastState::Stopped => {
+                self.cast_device = None;
+                let pos = self.caster.status.pos();
+                self.seek_abs(pos, true);
+                self.toast(format!("{} {}", self.t("投屏已结束：", "Casting ended:"), dev.name));
+                return;
+            }
+            _ => {}
+        }
+        // Local playback stays paused; the UI mirrors the TV.
+        if !self.st.paused {
+            self.set("pause", "yes");
+        }
+        let d = self.caster.status.duration();
+        self.st.time = self.caster.status.pos();
+        if d > 0.0 {
+            self.st.duration = d;
+        }
+        self.st.paused = matches!(st, CastState::Paused | CastState::Connecting);
+        self.st.volume = f64::from_bits(self.caster.status.volume.load(Ordering::Relaxed));
+        self.st.muted = false;
+        self.st.eof = false;
+    }
+
+    // ------------------------------------------------------------ snapshots
+
+    /// `with_subs`: include subtitles (mpv's and the live ones).
+    /// `clipboard_only`: copy to the clipboard without keeping a file.
+    fn snapshot(&mut self, with_subs: bool, clipboard_only: bool) {
+        if self.current.is_none() || self.st.idle {
             return;
         }
         let name = self
@@ -446,10 +593,73 @@ impl PlayerApp {
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "snapshot".into());
-        let file = shots_dir().join(format!("{name}-{}.png", fmt_time(self.st.time).replace(':', "-")));
-        let _ = std::fs::create_dir_all(shots_dir());
-        self.cmd(&["screenshot-to-file", &file.to_string_lossy(), "video"]);
-        self.toast(format!("{} {}", self.t("已截图：", "Saved:"), file.display()));
+        let stamp = fmt_time(self.st.time).replace(':', "-");
+        let (file, ext) = if clipboard_only {
+            (std::env::temp_dir().join(format!("filmora-clip-{}.png", std::process::id())), "png".to_string())
+        } else {
+            let ext = match self.s.shot_format.as_str() {
+                "jpg" | "webp" => self.s.shot_format.clone(),
+                _ => "png".into(),
+            };
+            let dir = shots_dir(&self.s);
+            let _ = std::fs::create_dir_all(&dir);
+            let mut f = dir.join(format!("{name}-{stamp}.{ext}"));
+            let mut n = 2;
+            while f.exists() {
+                f = dir.join(format!("{name}-{stamp}-{n}.{ext}"));
+                n += 1;
+            }
+            (f, ext)
+        };
+        let _ = ext;
+        let flag = if with_subs { "subtitles" } else { "video" };
+        if let Some(m) = &self.mpv {
+            if let Err(e) = m.command(&["screenshot-to-file", &file.to_string_lossy(), flag]) {
+                self.toast(format!("{} {e}", self.t("截图失败：", "Snapshot failed:")));
+                return;
+            }
+        }
+        let lines = if with_subs { self.live_lines() } else { Vec::new() };
+        let clipboard = clipboard_only || self.s.shot_copy;
+        let ok_msg = if clipboard_only {
+            self.t("已复制当前画面到剪贴板", "Frame copied to clipboard").to_string()
+        } else if clipboard {
+            format!("{} {}（{}）", self.t("已截图：", "Saved:"), file.display(), self.t("已复制", "copied"))
+        } else {
+            format!("{} {}", self.t("已截图：", "Saved:"), file.display())
+        };
+        if lines.is_empty() && !clipboard {
+            self.toast(ok_msg);
+            return;
+        }
+        let job = shots::Job { path: file, lines, clipboard, temp: clipboard_only, jpeg_quality: self.s.shot_jpeg_quality };
+        let out = self.shot_msg.clone();
+        let fail = self.t("截图处理失败：", "Snapshot failed:").to_string();
+        std::thread::spawn(move || {
+            let msg = match shots::run(job) {
+                Ok(()) => ok_msg,
+                Err(e) => format!("{fail} {e}"),
+            };
+            *out.lock().unwrap() = Some(msg);
+        });
+    }
+
+    /// The live subtitle on screen right now, as lines to burn into a snapshot.
+    fn live_lines(&self) -> Vec<shots::Line> {
+        if !self.s.live_enabled {
+            return Vec::new();
+        }
+        let Some(cue) = self.live.shared.cue_at(self.st.time) else { return Vec::new() };
+        let big = self.s.sub_font_size / 720.0;
+        let small = big * 0.72;
+        let white = [255, 255, 255];
+        let yellow = [255, 226, 140];
+        let line = |t: &str, r: f32, c: [u8; 3]| shots::Line { text: t.to_string(), rel_size: r, color: c };
+        match (self.s.sub_mode, &cue.trans) {
+            (SubMode::Original, _) | (_, None) => vec![line(&cue.text, big, white)],
+            (SubMode::Translated, Some(t)) => vec![line(t, big, white)],
+            (SubMode::Bilingual, Some(t)) => vec![line(t, big, white), line(&cue.text, small, yellow)],
+        }
     }
 
     fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
@@ -487,7 +697,9 @@ impl PlayerApp {
         let f = k(none, Key::F) || k(none, Key::Enter);
         let esc = k(none, Key::Escape);
         let m = k(none, Key::M);
+        let shift_s = k(Modifiers::SHIFT, Key::S);
         let s = k(none, Key::S);
+        let copy = k(ctrl, Key::C);
         let stats = k(ctrl, Key::I);
         let open = k(ctrl, Key::O);
         let slower = k(none, Key::OpenBracket);
@@ -496,19 +708,19 @@ impl PlayerApp {
         let next = k(none, Key::PageDown);
         let c = k(none, Key::C);
         if space {
-            self.cmd(&["cycle", "pause"]);
+            self.toggle_pause();
         }
         if left {
-            self.cmd(&["seek", "-5"]);
+            self.seek_rel(-5.0);
         }
         if right {
-            self.cmd(&["seek", "5"]);
+            self.seek_rel(5.0);
         }
         if up {
-            self.cmd(&["add", "volume", "5"]);
+            self.set_volume(self.st.volume + 5.0);
         }
         if down {
-            self.cmd(&["add", "volume", "-5"]);
+            self.set_volume(self.st.volume - 5.0);
         }
         if f {
             self.toggle_fullscreen(ctx);
@@ -524,7 +736,13 @@ impl PlayerApp {
             self.cmd(&["cycle", "mute"]);
         }
         if s {
-            self.snapshot();
+            self.snapshot(self.s.shot_with_subs, false);
+        }
+        if shift_s {
+            self.snapshot(!self.s.shot_with_subs, false);
+        }
+        if copy {
+            self.snapshot(self.s.shot_with_subs, true);
         }
         if stats {
             self.show_stats = !self.show_stats;
@@ -596,6 +814,10 @@ impl eframe::App for PlayerApp {
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         self.live.stop();
+        if self.casting() {
+            self.caster.stop();
+            std::thread::sleep(Duration::from_millis(300));
+        }
         if let Some(r) = &self.renderer {
             r.lock().unwrap().destroy(gl);
         }
@@ -718,7 +940,7 @@ impl PlayerApp {
         let bg = ui.interact(rect, Id::new("video-bg"), Sense::click());
         if !self.st.idle {
             if bg.clicked() {
-                self.cmd(&["cycle", "pause"]);
+                self.toggle_pause();
             }
             if bg.double_clicked() {
                 self.toggle_fullscreen(&ctx);
@@ -726,7 +948,7 @@ impl PlayerApp {
             if bg.hovered() {
                 let dy = ctx.input(|i| i.raw_scroll_delta.y);
                 if dy.abs() > 0.5 {
-                    self.cmd(&["add", "volume", if dy > 0.0 { "2" } else { "-2" }]);
+                    self.set_volume(self.st.volume + if dy > 0.0 { 2.0 } else { -2.0 });
                 }
             }
         }
@@ -734,6 +956,9 @@ impl PlayerApp {
 
         if self.st.idle {
             self.empty_state(ui, rect);
+        }
+        if self.casting() {
+            self.cast_banner(ui, rect);
         }
 
         let active = self.last_motion.elapsed() < Duration::from_millis(2500)
@@ -819,7 +1044,7 @@ impl PlayerApp {
                         (ic::PAUSE, self.t("暂停 (空格)", "Pause (Space)"))
                     };
                     if icon_button(ui, g, 24.0, tip).clicked() {
-                        self.cmd(&["cycle", "pause"]);
+                        self.toggle_pause();
                     }
                     ui.add_space(8.0);
                     if icon_button(ui, ic::SKIP_BACK, 20.0, self.t("上一个", "Previous")).clicked() {
@@ -868,6 +1093,12 @@ impl PlayerApp {
                         ui.menu_button(icon(ic::SETTINGS, 21.0), |ui| self.settings_menu(ui, &ctx))
                             .response
                             .on_hover_text(self.t("设置", "Settings"));
+                        let cast_color = if self.casting() { ACCENT } else { TEXT };
+                        let cast_btn = ui.menu_button(icon(ic::CAST, 21.0).color(cast_color), |ui| self.cast_menu(ui, &ctx));
+                        if cast_btn.response.clicked() && !self.caster.discovery.searching.load(Ordering::Relaxed) && self.caster.discovery.devices.lock().unwrap().is_empty() {
+                            self.caster.discovery.search(ctx.clone());
+                        }
+                        cast_btn.response.on_hover_text(self.t("投屏到电视", "Cast to TV"));
                         let cc_color = if self.s.live_enabled { ACCENT } else { TEXT };
                         ui.menu_button(icon(ic::CAPTIONS, 21.0).color(cc_color), |ui| self.cc_menu(ui))
                             .response
@@ -945,9 +1176,7 @@ impl PlayerApp {
         if resp.dragged() || resp.clicked() {
             if let Some(pos) = resp.interact_pointer_pos() {
                 let v = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0) * 100.0;
-                self.set("volume", &format!("{v:.0}"));
-                self.set("mute", "no");
-                self.st.volume = v as f64;
+                self.set_volume(v as f64);
             }
         }
         resp.on_hover_text(format!("{:.0}%", self.st.volume));
@@ -1022,9 +1251,13 @@ impl PlayerApp {
         ui.menu_button(menu_label(ic::VOLUME, self.t("音轨", "Audio Track")), |ui| self.track_items(ui, "audio"));
         ui.menu_button(menu_label(ic::MONITOR, self.t("清晰度", "Quality")), |ui| self.quality_items(ui));
         ui.separator();
-        if ui.add(egui::Button::new(menu_label(ic::CAMERA, self.t("截图", "Snapshot"))).shortcut_text("S")).clicked() {
+        ui.menu_button(menu_label(ic::CAMERA, self.t("截图", "Snapshot")), |ui| self.snapshot_items(ui, ctx));
+        if ui.button(menu_label(ic::CAST, self.t("投屏…", "Cast…"))).clicked() {
             ui.close_menu();
-            self.snapshot();
+            if !self.caster.discovery.searching.load(Ordering::Relaxed) {
+                self.caster.discovery.search(ctx.clone());
+            }
+            self.toast(self.t("点击控制栏的投屏按钮选择设备", "Pick a device from the cast button in the control bar"));
         }
         let stats_sc = ctx.format_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND, Key::I));
         if ui
@@ -1043,6 +1276,141 @@ impl PlayerApp {
             ui.close_menu();
             self.show_prefs = true;
         }
+    }
+
+    fn snapshot_items(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.set_min_width(240.0);
+        let (s_main, s_alt) = if self.s.shot_with_subs {
+            (self.t("截图（含字幕）", "Snapshot (with subtitles)"), self.t("截图（纯画面）", "Snapshot (video only)"))
+        } else {
+            (self.t("截图（纯画面）", "Snapshot (video only)"), self.t("截图（含字幕）", "Snapshot (with subtitles)"))
+        };
+        if ui.add(egui::Button::new(menu_label(ic::CAMERA, s_main)).shortcut_text("S")).clicked() {
+            ui.close_menu();
+            self.snapshot(self.s.shot_with_subs, false);
+        }
+        if ui.add(egui::Button::new(menu_label(ic::CAPTIONS, s_alt)).shortcut_text("Shift+S")).clicked() {
+            ui.close_menu();
+            self.snapshot(!self.s.shot_with_subs, false);
+        }
+        let copy_sc = ctx.format_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND, Key::C));
+        if ui.add(egui::Button::new(menu_label(ic::COPY, self.t("复制当前画面", "Copy frame"))).shortcut_text(copy_sc)).clicked() {
+            ui.close_menu();
+            self.snapshot(self.s.shot_with_subs, true);
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(self.t("格式", "Format")).color(MUTED));
+            for f in ["png", "jpg", "webp"] {
+                if ui.selectable_label(self.s.shot_format == f, f.to_uppercase()).clicked() {
+                    self.s.shot_format = f.into();
+                    self.s.save();
+                }
+            }
+        });
+        if { let label = self.t("同时复制到剪贴板", "Also copy to clipboard"); ui.checkbox(&mut self.s.shot_copy, label) }.changed() {
+            self.s.save();
+        }
+        if ui.button(menu_label(ic::FOLDER, self.t("打开截图文件夹", "Open snapshot folder"))).clicked() {
+            ui.close_menu();
+            let d = shots_dir(&self.s);
+            let _ = std::fs::create_dir_all(&d);
+            open_path(&d);
+        }
+    }
+
+    fn cast_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.set_min_width(280.0);
+        if let Some(dev) = self.cast_device.clone() {
+            let state = match self.caster.status.state() {
+                CastState::Connecting => self.t("连接中…", "Connecting…"),
+                CastState::Buffering => self.t("缓冲中…", "Buffering…"),
+                CastState::Playing => self.t("播放中", "Playing"),
+                CastState::Paused => self.t("已暂停", "Paused"),
+                _ => "",
+            };
+            ui.label(RichText::new(format!("{}  {}", ic::TV, dev.name)).strong());
+            ui.label(RichText::new(state).size(12.5).color(MUTED));
+            ui.separator();
+            if ui.button(menu_label(ic::STOP, self.t("停止投屏，在本机继续", "Stop casting, resume here"))).clicked() {
+                ui.close_menu();
+                self.stop_cast(true);
+            }
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(self.t("投屏到（DLNA）", "Cast to (DLNA)")).color(MUTED).size(12.5));
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                let searching = self.caster.discovery.searching.load(Ordering::Relaxed);
+                if searching {
+                    ui.add(egui::Spinner::new().size(14.0));
+                } else if ui.small_button(menu_label(ic::REFRESH, self.t("刷新", "Refresh"))).clicked() {
+                    self.caster.discovery.search(ctx.clone());
+                }
+            });
+        });
+        let devices = self.caster.discovery.devices.lock().unwrap().clone();
+        if devices.is_empty() {
+            let msg = if self.caster.discovery.searching.load(Ordering::Relaxed) {
+                self.t("正在搜索局域网中的电视和盒子…", "Searching the network for TVs and boxes…")
+            } else {
+                self.t("没有找到设备。请确认电视已开机、和电脑在同一 Wi-Fi，并允许本应用通过防火墙。", "No devices found. Make sure the TV is on, on the same Wi-Fi, and this app is allowed through the firewall.")
+            };
+            ui.add(egui::Label::new(RichText::new(msg).size(13.0).color(MUTED)).wrap());
+        }
+        for d in devices {
+            let label = if d.model.is_empty() || d.model == d.name {
+                format!("{}   {}", ic::TV, d.name)
+            } else {
+                format!("{}   {}  ·  {}", ic::TV, d.name, d.model)
+            };
+            if ui.button(label).clicked() {
+                ui.close_menu();
+                self.start_cast(d);
+            }
+        }
+        ui.separator();
+        if { let label = self.t("同时发送字幕（实时字幕或 SRT）", "Send subtitles too (live or SRT)"); ui.checkbox(&mut self.s.cast_subs, label) }.changed() {
+            self.s.save();
+        }
+        ui.label(
+            RichText::new(self.t("电视自己解码，不支持的格式需先转码", "The TV decodes the file; unsupported formats won't play"))
+                .size(12.0)
+                .color(MUTED),
+        );
+    }
+
+    fn cast_banner(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let Some(dev) = self.cast_device.clone() else { return };
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::ZERO, Color32::from_black_alpha(170));
+        let c = rect.center() - vec2(0.0, 30.0);
+        p.text(c - vec2(0.0, 40.0), Align2::CENTER_CENTER, ic::CAST, FontId::new(54.0, ic::family()), ACCENT);
+        p.text(
+            c + vec2(0.0, 20.0),
+            Align2::CENTER_CENTER,
+            format!("{} {}", self.t("正在投屏到", "Casting to"), dev.name),
+            FontId::proportional(20.0),
+            TEXT,
+        );
+        let state = match self.caster.status.state() {
+            CastState::Connecting => self.t("连接中…", "Connecting…"),
+            CastState::Buffering => self.t("电视正在缓冲…", "TV is buffering…"),
+            CastState::Paused => self.t("已暂停", "Paused"),
+            _ => self.t("用下方控制栏操控电视", "Use the controls below to drive the TV"),
+        };
+        p.text(c + vec2(0.0, 50.0), Align2::CENTER_CENTER, state, FontId::proportional(14.0), MUTED);
+        let btn = Rect::from_center_size(c + vec2(0.0, 95.0), vec2(200.0, 38.0));
+        let r = ui.put(
+            btn,
+            egui::Button::new(RichText::new(menu_label(ic::STOP, self.t("停止投屏", "Stop casting"))).color(Color32::WHITE))
+                .fill(Color32::from_white_alpha(28))
+                .corner_radius(CornerRadius::same(10)),
+        );
+        if r.clicked() {
+            self.stop_cast(true);
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(500));
     }
 
     fn cc_menu(&mut self, ui: &mut egui::Ui) {
@@ -1310,9 +1678,59 @@ impl PlayerApp {
             ui.end_row();
 
             ui.label(self.t("截图目录", "Snapshots"));
-            if ui.link(shots_dir().display().to_string()).clicked() {
-                let _ = std::fs::create_dir_all(shots_dir());
-                open_path(&shots_dir());
+            ui.horizontal(|ui| {
+                let d = shots_dir(&self.s);
+                if ui.link(d.display().to_string()).clicked() {
+                    let _ = std::fs::create_dir_all(&d);
+                    open_path(&d);
+                }
+                if ui.small_button(self.t("更改…", "Change…")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_directory(&d).pick_folder() {
+                        self.s.shot_dir = p.to_string_lossy().to_string();
+                        self.s.save();
+                        self.set("screenshot-directory", &self.s.shot_dir.clone());
+                    }
+                }
+                if !self.s.shot_dir.is_empty() && ui.small_button(self.t("恢复默认", "Default")).clicked() {
+                    self.s.shot_dir.clear();
+                    self.s.save();
+                }
+            });
+            ui.end_row();
+
+            ui.label(self.t("截图格式", "Snapshot format"));
+            ui.horizontal(|ui| {
+                for f in ["png", "jpg", "webp"] {
+                    if ui.selectable_label(self.s.shot_format == f, f.to_uppercase()).clicked() {
+                        self.s.shot_format = f.into();
+                        self.s.save();
+                    }
+                }
+                if self.s.shot_format == "jpg" {
+                    let mut q = self.s.shot_jpeg_quality as u32;
+                    if ui.add(egui::Slider::new(&mut q, 50..=100).text(self.t("质量", "quality"))).changed() {
+                        self.s.shot_jpeg_quality = q as u8;
+                        self.s.save();
+                        self.set("screenshot-jpeg-quality", &q.to_string());
+                    }
+                }
+            });
+            ui.end_row();
+
+            ui.label("");
+            ui.vertical(|ui| {
+                if { let label = self.t("S 键截图包含字幕（Shift+S 相反）", "S includes subtitles (Shift+S does the opposite)"); ui.checkbox(&mut self.s.shot_with_subs, label) }.changed() {
+                    self.s.save();
+                }
+                if { let label = self.t("截图同时复制到剪贴板", "Also copy snapshots to the clipboard"); ui.checkbox(&mut self.s.shot_copy, label) }.changed() {
+                    self.s.save();
+                }
+            });
+            ui.end_row();
+
+            ui.label(self.t("投屏", "Casting"));
+            if { let label = self.t("投屏时发送字幕（实时字幕或已加载的 SRT）", "Send subtitles when casting (live or loaded SRT)"); ui.checkbox(&mut self.s.cast_subs, label) }.changed() {
+                self.s.save();
             }
             ui.end_row();
 
@@ -1330,8 +1748,8 @@ impl PlayerApp {
         ui.add_space(10.0);
         ui.label(
             RichText::new(self.t(
-                "快捷键：空格 播放/暂停 · ←/→ 快退/快进 5 秒 · ↑/↓ 音量 · F 全屏 · M 静音 · S 截图 · [ ] 调速 · PgUp/PgDn 上/下一个 · C 实时字幕 · Ctrl+I 统计 · Ctrl+O 打开",
-                "Keys: Space play/pause · ←/→ seek 5 s · ↑/↓ volume · F full screen · M mute · S snapshot · [ ] speed · PgUp/PgDn prev/next · C live subtitles · Ctrl+I stats · Ctrl+O open",
+                "快捷键：空格 播放/暂停 · ←/→ 快退/快进 5 秒 · ↑/↓ 音量 · F 全屏 · M 静音 · S 截图 · Shift+S 截图（另一种字幕模式）· Ctrl+C 复制画面 · [ ] 调速 · PgUp/PgDn 上/下一个 · C 实时字幕 · Ctrl+I 统计 · Ctrl+O 打开",
+                "Keys: Space play/pause · ←/→ seek 5 s · ↑/↓ volume · F full screen · M mute · S snapshot · Shift+S snapshot (other subtitle mode) · Ctrl+C copy frame · [ ] speed · PgUp/PgDn prev/next · C live subtitles · Ctrl+I stats · Ctrl+O open",
             ))
             .size(12.5)
             .color(MUTED),
@@ -1607,7 +2025,10 @@ fn natural_key(s: &str) -> Vec<(u8, u64, String)> {
     out
 }
 
-fn shots_dir() -> PathBuf {
+fn shots_dir(s: &Settings) -> PathBuf {
+    if !s.shot_dir.is_empty() {
+        return PathBuf::from(&s.shot_dir);
+    }
     dirs::picture_dir().unwrap_or_else(|| settings::data_dir()).join(APP_NAME)
 }
 

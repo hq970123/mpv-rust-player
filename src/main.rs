@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod cast;
 mod icons;
 mod live;
 mod models;
 mod mpv;
 mod render;
 mod settings;
+mod shots;
 
 use eframe::egui;
 

@@ -48,6 +48,17 @@ pub struct Settings {
     /// Download models through hf-mirror.com (faster in mainland China).
     pub use_mirror: bool,
     pub live_enabled: bool,
+    /// Snapshot file format: "png", "jpg" or "webp".
+    pub shot_format: String,
+    pub shot_jpeg_quality: u8,
+    /// Custom snapshot folder; empty = Pictures/Filmora Player.
+    pub shot_dir: String,
+    /// Default for S: include subtitles (file + live) in the snapshot.
+    pub shot_with_subs: bool,
+    /// Copy every snapshot to the clipboard as well.
+    pub shot_copy: bool,
+    /// Send live / loaded subtitles along when casting.
+    pub cast_subs: bool,
 }
 
 impl Default for Settings {
@@ -68,6 +79,12 @@ impl Default for Settings {
             sub_font_size: 28.0,
             use_mirror: false,
             live_enabled: false,
+            shot_format: "png".into(),
+            shot_jpeg_quality: 92,
+            shot_dir: String::new(),
+            shot_with_subs: false,
+            shot_copy: false,
+            cast_subs: true,
         }
     }
 }
