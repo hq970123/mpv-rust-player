@@ -35,7 +35,7 @@ cargo build --release
 `.github/workflows/build.yml`：
 
 - Windows：下载 shinchiro 最新 `mpv-dev-x86_64` → 编译 → 便携 zip + Inno Setup 安装包。
-- macOS：arm64（macos-14）与 x64（macos-15-intel）分别 `brew install mpv dylibbundler` → 编译 → 打包 .app（依赖全部内置、ad-hoc 签名）→ dmg。
+- macOS：arm64（macos-15）与 x64（macos-15-intel）分别 `brew install mpv dylibbundler` → 编译 → 打包 .app（依赖全部内置、ad-hoc 签名）→ dmg。
 - push 到 main 发布 `build-N` 预发布；推 `v*` 标签发布正式版。
 
 ## 架构
