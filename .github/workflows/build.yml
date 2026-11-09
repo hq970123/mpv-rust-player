@@ -12,16 +12,18 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Build whisper.cpp for a portable CPU baseline, not the runner's own CPU:
-  # -mcpu=native breaks on newer Apple runners (i8mm) and could ship
-  # instructions (e.g. AVX-512) the user's machine lacks. Maps to GGML_NATIVE.
-  WHISPER_NATIVE: "OFF"
 
 jobs:
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Portable whisper.cpp (no -mcpu/-march=native)
+        shell: bash
+        run: |
+          ws="$GITHUB_WORKSPACE"
+          if command -v cygpath >/dev/null; then ws="$(cygpath -m "$ws")"; fi
+          echo "CMAKE_PROJECT_INCLUDE_BEFORE=$ws/scripts/ggml-portable.cmake" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -79,6 +81,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Portable whisper.cpp (no -mcpu/-march=native)
+        shell: bash
+        run: |
+          ws="$GITHUB_WORKSPACE"
+          if command -v cygpath >/dev/null; then ws="$(cygpath -m "$ws")"; fi
+          echo "CMAKE_PROJECT_INCLUDE_BEFORE=$ws/scripts/ggml-portable.cmake" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
