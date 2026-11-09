@@ -150,6 +150,8 @@ pub struct PlayerApp {
     cast_device: Option<Device>,
     shot_msg: Arc<Mutex<Option<String>>>,
     x: extra::Extra,
+    thumbs: crate::thumbs::Thumbs,
+    inbox: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
 }
 
 impl PlayerApp {
@@ -187,7 +189,12 @@ impl PlayerApp {
             cast_device: None,
             shot_msg: Arc::new(Mutex::new(None)),
             x: extra::Extra::default(),
+            thumbs: crate::thumbs::Thumbs::new(cc.egui_ctx.clone()),
+            inbox: None,
         };
+        if app.s.single_instance {
+            app.inbox = crate::single::listen(cc.egui_ctx.clone());
+        }
         let volume = format!("{}", app.s.volume);
         let shots = shots_dir(&app.s).to_string_lossy().to_string();
         let jpeg_q = app.s.shot_jpeg_quality.to_string();
@@ -337,6 +344,8 @@ impl PlayerApp {
                 Event::FileLoaded => {
                     self.refresh_tracks();
                     self.on_loaded_extra();
+                    let dur = m.get_f64("duration").unwrap_or(0.0);
+                    self.thumbs.set_file(self.current.as_deref(), dur);
                     self.schedule_live(true, 0);
                     self.apply_quality();
                 }
@@ -796,6 +805,20 @@ impl eframe::App for PlayerApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
+        let inbox: Vec<Option<PathBuf>> = self.inbox.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
+        for msg in inbox {
+            if let Some(p) = msg {
+                if p.to_string_lossy().contains("://") {
+                    self.playlist = vec![p.clone()];
+                    self.index = 0;
+                    self.load(p);
+                } else {
+                    self.open_many(vec![p]);
+                }
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         self.keyboard_extra(ctx);
         self.keyboard(ctx);
 
@@ -1197,6 +1220,19 @@ impl PlayerApp {
             };
             let galley = ui.painter().layout_no_wrap(label, FontId::proportional(12.5), Color32::WHITE);
             let r = Rect::from_center_size(pos2(pos.x, rect.top() - 16.0), galley.size() + vec2(12.0, 6.0));
+            if self.s.seek_thumbs && !self.casting() {
+                if let Some(tex) = self.thumbs.get(t) {
+                    let sz = tex.size_vec2();
+                    let w = 176.0f32;
+                    let h = w * sz.y / sz.x.max(1.0);
+                    let screen = ui.ctx().screen_rect();
+                    let cx = pos.x.clamp(screen.left() + w / 2.0 + 6.0, screen.right() - w / 2.0 - 6.0);
+                    let img = Rect::from_center_size(pos2(cx, r.top() - 6.0 - h / 2.0), vec2(w, h));
+                    let p = ui.painter();
+                    p.rect_filled(img.expand(2.0), CornerRadius::same(6), Color32::from_black_alpha(220));
+                    p.image(tex.id(), img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+            }
             ui.painter().rect_filled(r, CornerRadius::same(5), Color32::from_black_alpha(200));
             ui.painter().galley(r.min + vec2(6.0, 3.0), galley, Color32::WHITE);
         }
@@ -1853,6 +1889,25 @@ impl PlayerApp {
             ui.end_row();
 
             ui.label(self.t("播放", "Playback"));
+            {
+                let label = self.t("进度条悬停显示缩略图", "Thumbnail preview on the seek bar");
+                if ui.checkbox(&mut self.s.seek_thumbs, label).changed() {
+                    self.s.save();
+                }
+            }
+            ui.end_row();
+            ui.label("");
+            {
+                let label = self.t(
+                    "只开一个窗口（双击文件在当前窗口播放，重启后生效）",
+                    "Single window (open files in the running player; after restart)",
+                );
+                if ui.checkbox(&mut self.s.single_instance, label).changed() {
+                    self.s.save();
+                }
+            }
+            ui.end_row();
+            ui.label("");
             {
                 let label = self.t("记住播放进度，下次从上次位置继续", "Resume files where you left off");
                 if ui.checkbox(&mut self.s.resume, label).changed() {

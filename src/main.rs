@@ -9,6 +9,8 @@ mod mpv;
 mod render;
 mod settings;
 mod shots;
+mod single;
+mod thumbs;
 
 use eframe::egui;
 
@@ -16,6 +18,9 @@ pub const APP_NAME: &str = "Filmora Player";
 
 fn main() -> eframe::Result<()> {
     let file_arg = std::env::args().nth(1);
+    if settings::Settings::load().single_instance && single::forward(file_arg.as_deref()) {
+        return Ok(());
+    }
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(APP_NAME)
@@ -25,10 +30,7 @@ fn main() -> eframe::Result<()> {
     #[cfg(target_os = "macos")]
     {
         // Native traffic lights over our own dark title bar.
-        viewport = viewport
-            .with_fullsize_content_view(true)
-            .with_title_shown(false)
-            .with_titlebar_shown(false);
+        viewport = viewport.with_fullsize_content_view(true).with_title_shown(false).with_titlebar_shown(false);
     }
     #[cfg(not(target_os = "macos"))]
     {

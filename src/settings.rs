@@ -73,6 +73,9 @@ pub struct Settings {
     /// Audio EQ preset: off / bass / treble / vocal / night.
     pub audio_eq: String,
     pub audio_norm: bool,
+    /// Open files in the running window instead of a new one.
+    pub single_instance: bool,
+    pub seek_thumbs: bool,
 }
 
 impl Default for Settings {
@@ -103,6 +106,8 @@ impl Default for Settings {
             resume: true,
             audio_eq: "off".into(),
             audio_norm: false,
+            single_instance: true,
+            seek_thumbs: true,
         }
     }
 }

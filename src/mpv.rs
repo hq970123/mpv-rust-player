@@ -60,6 +60,11 @@ pub const RENDER_PARAM_API_TYPE: c_int = 1;
 pub const RENDER_PARAM_OPENGL_INIT_PARAMS: c_int = 2;
 pub const RENDER_PARAM_OPENGL_FBO: c_int = 3;
 pub const RENDER_PARAM_FLIP_Y: c_int = 4;
+pub const RENDER_PARAM_SW_SIZE: c_int = 17;
+pub const RENDER_PARAM_SW_FORMAT: c_int = 18;
+pub const RENDER_PARAM_SW_STRIDE: c_int = 19;
+pub const RENDER_PARAM_SW_POINTER: c_int = 20;
+pub const RENDER_UPDATE_FRAME: u64 = 1;
 
 const FORMAT_DOUBLE: c_int = 5;
 
@@ -76,7 +81,10 @@ pub enum Event {
     StartFile,
     FileLoaded,
     /// reason: 0 eof, 2 stop, 3 quit, 4 error, 5 redirect
-    EndFile { reason: i32, error: i32 },
+    EndFile {
+        reason: i32,
+        error: i32,
+    },
     Seek,
     PlaybackRestart,
     Shutdown,
@@ -94,8 +102,7 @@ type FnCommand = unsafe extern "C" fn(*mut MpvHandle, *mut *const c_char) -> c_i
 type FnWaitEvent = unsafe extern "C" fn(*mut MpvHandle, f64) -> *mut MpvEvent;
 type FnErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
 type FnClientApiVersion = unsafe extern "C" fn() -> std::ffi::c_ulong;
-type FnRenderCreate =
-    unsafe extern "C" fn(*mut *mut MpvRenderContext, *mut MpvHandle, *mut MpvRenderParam) -> c_int;
+type FnRenderCreate = unsafe extern "C" fn(*mut *mut MpvRenderContext, *mut MpvHandle, *mut MpvRenderParam) -> c_int;
 type FnRenderSetUpdateCallback =
     unsafe extern "C" fn(*mut MpvRenderContext, Option<unsafe extern "C" fn(*mut c_void)>, *mut c_void);
 type FnRenderUpdate = unsafe extern "C" fn(*mut MpvRenderContext) -> u64;
@@ -127,10 +134,7 @@ pub struct Api {
 static API: OnceLock<Result<Api, String>> = OnceLock::new();
 
 fn candidates() -> Vec<PathBuf> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_default();
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())).unwrap_or_default();
     let mut v = Vec::new();
     if let Ok(p) = std::env::var("MPV_LIBRARY_PATH") {
         v.push(PathBuf::from(p));
@@ -187,8 +191,7 @@ fn load() -> Result<Api, String> {
 unsafe fn bind(lib: libloading::Library, path: String) -> Result<Api, String> {
     macro_rules! sym {
         ($name:literal) => {
-            *lib.get(concat!($name, "\0").as_bytes())
-                .map_err(|e| format!("missing symbol {}: {e}", $name))?
+            *lib.get(concat!($name, "\0").as_bytes()).map_err(|e| format!("missing symbol {}: {e}", $name))?
         };
     }
     Ok(Api {
@@ -262,9 +265,7 @@ impl Mpv {
     }
 
     fn err(&self, code: c_int) -> String {
-        unsafe { CStr::from_ptr((self.api.error_string)(code)) }
-            .to_string_lossy()
-            .into_owned()
+        unsafe { CStr::from_ptr((self.api.error_string)(code)) }.to_string_lossy().into_owned()
     }
 
     pub fn set_option(&self, name: &str, value: &str) -> Result<(), String> {
@@ -301,9 +302,8 @@ impl Mpv {
     pub fn get_f64(&self, name: &str) -> Option<f64> {
         let n = cstr(name);
         let mut out = 0f64;
-        let r = unsafe {
-            (self.api.get_property)(self.h, n.as_ptr(), FORMAT_DOUBLE, &mut out as *mut f64 as *mut c_void)
-        };
+        let r =
+            unsafe { (self.api.get_property)(self.h, n.as_ptr(), FORMAT_DOUBLE, &mut out as *mut f64 as *mut c_void) };
         (r >= 0).then_some(out)
     }
 
@@ -325,7 +325,12 @@ impl Mpv {
 
     /// Non-blocking: returns the next queued event, if any.
     pub fn poll_event(&self) -> Option<Event> {
-        let ev = unsafe { &*(self.api.wait_event)(self.h, 0.0) };
+        self.wait_event(0.0)
+    }
+
+    /// Waits up to `timeout` seconds for the next event.
+    pub fn wait_event(&self, timeout: f64) -> Option<Event> {
+        let ev = unsafe { &*(self.api.wait_event)(self.h, timeout) };
         Some(match ev.event_id {
             EVENT_NONE => return None,
             EVENT_SHUTDOWN => Event::Shutdown,
