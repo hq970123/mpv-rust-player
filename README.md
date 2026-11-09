@@ -1,4 +1,4 @@
-# Filmora Player (mpv + Rust)
+# OK Player (mpv + Rust)
 
 高性能本地视频播放器：libmpv 内核 + Rust/egui 原生界面，内置可下载的 whisper 语音模型，实时识别语音并生成翻译字幕（原文 / 译文 / 双语）。
 
@@ -46,7 +46,7 @@ src/render.rs   mpv OpenGL render API → 离屏 FBO → blit 进 egui 画面（
 src/app.rs      界面：标题栏、控制条、菜单、字幕叠加、统计、偏好设置
 src/live.rs     实时字幕管线：音频旁路 → VAD → whisper → 翻译
 src/models.rs   whisper 模型目录与断点续传下载
-src/settings.rs 设置持久化（数据目录/FilmoraPlayer/settings.json）
+src/settings.rs 设置持久化（数据目录/OKPlayer/settings.json）
 ```
 
 ## 许可

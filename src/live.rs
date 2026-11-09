@@ -165,7 +165,7 @@ impl Tap {
     fn new(media: &str, pos: f64, aid: Option<&str>) -> Result<Self, String> {
         static N: AtomicU64 = AtomicU64::new(0);
         let file = std::env::temp_dir().join(format!(
-            "filmora-player-{}-{}.pcm",
+            "ok-player-{}-{}.pcm",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -607,7 +607,7 @@ pub fn translate(client: &reqwest::blocking::Client, cfg: &Config, text: &str) -
         body["enable_thinking"] = serde_json::json!(false);
     }
     let mut req = client.post(format!("{base}/chat/completions")).json(&body);
-    req = req.header("User-Agent", if bilibili { "Index-Translate-Client/1.0" } else { "FilmoraPlayer/0.1" });
+    req = req.header("User-Agent", if bilibili { "Index-Translate-Client/1.0" } else { "OKPlayer/0.1" });
     if !key.is_empty() {
         req = req.bearer_auth(key);
     }

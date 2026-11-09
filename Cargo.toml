@@ -6,7 +6,7 @@ description = "High-performance local video player built on libmpv, with live sp
 license = "MIT"
 
 [[bin]]
-name = "filmora-player"
+name = "ok-player"
 path = "src/main.rs"
 
 [dependencies]

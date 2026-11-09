@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const APP_DIR: &str = "FilmoraPlayer";
+pub const APP_DIR: &str = "OKPlayer";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiLang {
@@ -59,7 +59,7 @@ pub struct Settings {
     /// Snapshot file format: "png", "jpg" or "webp".
     pub shot_format: String,
     pub shot_jpeg_quality: u8,
-    /// Custom snapshot folder; empty = Pictures/Filmora Player.
+    /// Custom snapshot folder; empty = Pictures/OK Player.
     pub shot_dir: String,
     /// Default for S: include subtitles (file + live) in the snapshot.
     pub shot_with_subs: bool,
@@ -113,7 +113,13 @@ impl Default for Settings {
 }
 
 pub fn data_dir() -> PathBuf {
-    let d = dirs::data_dir().unwrap_or_else(std::env::temp_dir).join(APP_DIR);
+    let base = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
+    let d = base.join(APP_DIR);
+    // Renamed from "FilmoraPlayer": carry over settings, history and models.
+    let old = base.join("FilmoraPlayer");
+    if !d.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &d);
+    }
     let _ = std::fs::create_dir_all(&d);
     d
 }

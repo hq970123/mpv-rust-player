@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Build FilmoraPlayer.app with Homebrew's libmpv and all its dylibs bundled,
+# Build OKPlayer.app with Homebrew's libmpv and all its dylibs bundled,
 # then wrap it in a .dmg. Usage: scripts/macos-bundle.sh <arch-label>
 set -euo pipefail
 ARCH="${1:-$(uname -m)}"
 VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-APP="dist/FilmoraPlayer.app"
+APP="dist/OKPlayer.app"
 BREW="$(brew --prefix)"
 
 rm -rf dist && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
-cp target/release/filmora-player "$APP/Contents/MacOS/FilmoraPlayer"
+cp target/release/ok-player "$APP/Contents/MacOS/OKPlayer"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Filmora Player</string>
-  <key>CFBundleDisplayName</key><string>Filmora Player</string>
-  <key>CFBundleIdentifier</key><string>com.filmora.player.mpv</string>
-  <key>CFBundleExecutable</key><string>FilmoraPlayer</string>
+  <key>CFBundleName</key><string>OK Player</string>
+  <key>CFBundleDisplayName</key><string>OK Player</string>
+  <key>CFBundleIdentifier</key><string>com.hq970123.okplayer</string>
+  <key>CFBundleExecutable</key><string>OKPlayer</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
@@ -49,5 +49,5 @@ find "$APP/Contents/Frameworks" -name '*.dylib' -exec codesign --force -s - {} \
 codesign --force --deep -s - "$APP"
 
 cp README.md THIRD_PARTY.md dist/
-hdiutil create -volname "Filmora Player" -srcfolder "$APP" -ov -format UDZO "dist/FilmoraPlayer-macos-${ARCH}.dmg"
+hdiutil create -volname "OK Player" -srcfolder "$APP" -ov -format UDZO "dist/OKPlayer-macos-${ARCH}.dmg"
 ls -la dist

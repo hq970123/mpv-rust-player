@@ -14,7 +14,7 @@ mod thumbs;
 
 use eframe::egui;
 
-pub const APP_NAME: &str = "Filmora Player";
+pub const APP_NAME: &str = "OK Player";
 
 fn main() -> eframe::Result<()> {
     let file_arg = std::env::args().nth(1);

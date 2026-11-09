@@ -48,19 +48,19 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $out = "dist/FilmoraPlayer"
+          $out = "dist/OKPlayer"
           New-Item -ItemType Directory -Force $out | Out-Null
-          Copy-Item target/release/filmora-player.exe "$out/FilmoraPlayer.exe"
+          Copy-Item target/release/ok-player.exe "$out/OKPlayer.exe"
           Copy-Item mpv-dev/libmpv-2.dll $out
           Copy-Item README.md, THIRD_PARTY.md $out
-          Compress-Archive -Path "$out/*" -DestinationPath dist/FilmoraPlayer-windows-x64-portable.zip -Force
+          Compress-Archive -Path "$out/*" -DestinationPath dist/OKPlayer-windows-x64-portable.zip -Force
 
       - name: Installer (Inno Setup)
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
-          & $iscc /DSourceDir="$PWD\dist\FilmoraPlayer" /DOutDir="$PWD\dist" scripts\installer.iss
+          & $iscc /DSourceDir="$PWD\dist\OKPlayer" /DOutDir="$PWD\dist" scripts\installer.iss
 
       - uses: actions/upload-artifact@v4
         with:

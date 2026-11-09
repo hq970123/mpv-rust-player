@@ -619,7 +619,7 @@ impl PlayerApp {
             .unwrap_or_else(|| "snapshot".into());
         let stamp = fmt_time(self.st.time).replace(':', "-");
         let (file, ext) = if clipboard_only {
-            (std::env::temp_dir().join(format!("filmora-clip-{}.png", std::process::id())), "png".to_string())
+            (std::env::temp_dir().join(format!("okplayer-clip-{}.png", std::process::id())), "png".to_string())
         } else {
             let ext = match self.s.shot_format.as_str() {
                 "jpg" | "webp" => self.s.shot_format.clone(),

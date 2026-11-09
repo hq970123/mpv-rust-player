@@ -2,7 +2,7 @@
 //! file to the running window over a loopback socket and exits.
 //!
 //! The first instance listens on 127.0.0.1:PORT. A new instance tries to
-//! connect; if a Filmora Player answers the handshake, it sends the path and
+//! connect; if a OK Player answers the handshake, it sends the path and
 //! quits. Anything else on the port (or no answer) means we just run normally.
 
 use std::io::{BufRead, BufReader, Write};
@@ -12,7 +12,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 
 const PORT: u16 = 47391;
-const HELLO: &str = "FILMORA-PLAYER/1";
+const HELLO: &str = "OK-PLAYER/1";
 
 fn addr() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], PORT))

@@ -93,7 +93,7 @@ fn run_download(url: &str, dest: &PathBuf, dl: &Download, ctx: &eframe::egui::Co
     let part = dest.with_extension("part");
     let mut have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
     let client = reqwest::blocking::Client::builder()
-        .user_agent("FilmoraPlayer/0.1")
+        .user_agent("OKPlayer/0.1")
         .connect_timeout(std::time::Duration::from_secs(20))
         .timeout(None)
         .build()

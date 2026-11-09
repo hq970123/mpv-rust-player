@@ -78,7 +78,7 @@ fn ssdp_search(window: Duration) -> Vec<String> {
     let _ = sock.set_read_timeout(Some(Duration::from_millis(300)));
     for st in ["urn:schemas-upnp-org:device:MediaRenderer:1", AVT] {
         let msg = format!(
-            "M-SEARCH * HTTP/1.1\r\nHOST: {SSDP_ADDR}\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: {st}\r\nUSER-AGENT: FilmoraPlayer/1.0 UPnP/1.1\r\n\r\n"
+            "M-SEARCH * HTTP/1.1\r\nHOST: {SSDP_ADDR}\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: {st}\r\nUSER-AGENT: OKPlayer/1.0 UPnP/1.1\r\n\r\n"
         );
         for _ in 0..2 {
             let _ = sock.send_to(msg.as_bytes(), SSDP_ADDR);
