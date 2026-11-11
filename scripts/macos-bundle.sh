@@ -30,6 +30,18 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSItemContentTypes</key><array>
       <string>public.movie</string><string>public.audiovisual-content</string><string>public.audio</string>
     </array>
+    <key>LSHandlerRank</key><string>Alternate</string>
+  </dict><dict>
+    <key>CFBundleTypeName</key><string>Video file</string>
+    <key>CFBundleTypeRole</key><string>Viewer</string>
+    <key>LSHandlerRank</key><string>Alternate</string>
+    <key>CFBundleTypeExtensions</key><array>
+      <string>mkv</string><string>mp4</string><string>m4v</string><string>mov</string><string>avi</string><string>wmv</string>
+      <string>flv</string><string>webm</string><string>ts</string><string>m2ts</string><string>mts</string><string>mpg</string>
+      <string>mpeg</string><string>vob</string><string>3gp</string><string>ogv</string><string>rmvb</string><string>rm</string>
+      <string>asf</string><string>f4v</string><string>mp3</string><string>flac</string><string>m4a</string><string>wav</string>
+      <string>ogg</string><string>opus</string>
+    </array>
   </dict></array>
 </dict></plist>
 PLIST

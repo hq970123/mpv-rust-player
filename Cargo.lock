@@ -1892,23 +1892,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ok-player"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "arboard",
- "dirs",
- "eframe",
- "image",
- "libloading",
- "reqwest",
- "rfd",
- "serde",
- "serde_json",
- "whisper-rs",
-]
-
-[[package]]
 name = "naga"
 version = "24.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2295,6 +2278,24 @@ dependencies = [
  "objc2 0.5.3",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "ok-player"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "arboard",
+ "dirs",
+ "eframe",
+ "image",
+ "libloading",
+ "objc2 0.6.5",
+ "reqwest",
+ "rfd",
+ "serde",
+ "serde_json",
+ "whisper-rs",
 ]
 
 [[package]]

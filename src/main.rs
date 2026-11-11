@@ -4,6 +4,8 @@ mod app;
 mod cast;
 mod icons;
 mod live;
+#[cfg(target_os = "macos")]
+mod macos_open;
 mod models;
 mod mpv;
 mod render;
@@ -21,6 +23,9 @@ fn main() -> eframe::Result<()> {
     if settings::Settings::load().single_instance && single::forward(file_arg.as_deref()) {
         return Ok(());
     }
+
+    #[cfg(target_os = "macos")]
+    macos_open::install();
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(APP_NAME)

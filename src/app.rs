@@ -192,6 +192,8 @@ impl PlayerApp {
             thumbs: crate::thumbs::Thumbs::new(cc.egui_ctx.clone()),
             inbox: None,
         };
+        #[cfg(target_os = "macos")]
+        crate::macos_open::set_ctx(&cc.egui_ctx);
         if app.s.single_instance {
             app.inbox = crate::single::listen(cc.egui_ctx.clone());
         }
@@ -805,7 +807,20 @@ impl eframe::App for PlayerApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
-        let inbox: Vec<Option<PathBuf>> = self.inbox.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
+        let mut inbox: Vec<Option<PathBuf>> = self.inbox.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        {
+            let finder = crate::macos_open::take();
+            if !finder.is_empty() {
+                // Several files from Finder become one playlist.
+                let (urls, files): (Vec<_>, Vec<_>) = finder.into_iter().partition(|p| p.to_string_lossy().contains("://"));
+                if !files.is_empty() {
+                    self.open_many(files);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                inbox.extend(urls.into_iter().map(Some));
+            }
+        }
         for msg in inbox {
             if let Some(p) = msg {
                 if p.to_string_lossy().contains("://") {
