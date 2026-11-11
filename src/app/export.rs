@@ -182,6 +182,8 @@ impl PlayerApp {
         let mut go = false;
         let dur = self.st.duration.max(0.0);
         let pos = self.st.time;
+        let zh = self.s.ui_lang == UiLang::Zh;
+        let tr = move |a: &'static str, b: &'static str| if zh { a } else { b };
         let title = self.t("导出片段 / GIF", "Export clip / GIF");
         egui::Window::new(title)
             .open(&mut open)
@@ -193,14 +195,14 @@ impl PlayerApp {
                 let busy = matches!(state, State::Running(_));
                 ui.add_enabled_ui(!busy, |ui| {
                     egui::Grid::new("export").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
-                        ui.label(self.t("格式", "Format"));
+                        ui.label(tr("格式", "Format"));
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut self.ex.format, Format::Mp4, "MP4");
                             ui.radio_value(&mut self.ex.format, Format::Gif, "GIF");
                         });
                         ui.end_row();
 
-                        for (is_start, label) in [(true, self.t("起点", "Start")), (false, self.t("终点", "End"))] {
+                        for (is_start, label) in [(true, tr("起点", "Start")), (false, tr("终点", "End"))] {
                             ui.label(label);
                             ui.horizontal(|ui| {
                                 let v = if is_start { &mut self.ex.start } else { &mut self.ex.end };
@@ -213,16 +215,15 @@ impl PlayerApp {
                                         })
                                         .custom_parser(parse_time),
                                 );
-                                if ui.small_button(self.t("设为当前", "Use current")).clicked() {
+                                if ui.small_button(tr("设为当前", "Use current")).clicked() {
                                     *v = pos.clamp(0.0, dur);
                                 }
                             });
                             ui.end_row();
                         }
 
-                        ui.label(self.t("尺寸", "Size"));
+                        ui.label(tr("尺寸", "Size"));
                         let cur = WIDTHS.iter().find(|w| w.0 == self.ex.width).copied().unwrap_or(WIDTHS[0]);
-                        let zh = self.s.ui_lang == UiLang::Zh;
                         egui::ComboBox::from_id_salt("export-width")
                             .selected_text(if zh { cur.1 } else { cur.2 })
                             .show_ui(ui, |ui| {
@@ -233,7 +234,7 @@ impl PlayerApp {
                         ui.end_row();
 
                         if self.ex.format == Format::Gif {
-                            ui.label(self.t("帧率", "Frame rate"));
+                            ui.label(tr("帧率", "Frame rate"));
                             ui.horizontal(|ui| {
                                 for f in [10, 15, 20, 24] {
                                     ui.selectable_value(&mut self.ex.fps, f, format!("{f}"));
@@ -241,36 +242,36 @@ impl PlayerApp {
                             });
                             ui.end_row();
                         } else {
-                            ui.label(self.t("声音", "Audio"));
-                            ui.checkbox(&mut self.ex.audio, self.t("包含声音", "Include audio"));
+                            ui.label(tr("声音", "Audio"));
+                            ui.checkbox(&mut self.ex.audio, tr("包含声音", "Include audio"));
                             ui.end_row();
                         }
 
-                        ui.label(self.t("字幕", "Subtitles"));
+                        ui.label(tr("字幕", "Subtitles"));
                         ui.vertical(|ui| {
-                            ui.radio_value(&mut self.ex.subs, SubPick::None, self.t("不加字幕", "None"));
+                            ui.radio_value(&mut self.ex.subs, SubPick::None, tr("不加字幕", "None"));
                             if self.sub_track_selected() {
                                 ui.radio_value(
                                     &mut self.ex.subs,
                                     SubPick::Track,
-                                    self.t("烧录当前字幕轨", "Burn in current track"),
+                                    tr("烧录当前字幕轨", "Burn in current track"),
                                 );
                             }
                             if self.live_cues() > 0 {
                                 ui.radio_value(
                                     &mut self.ex.subs,
                                     SubPick::Live,
-                                    self.t("烧录实时识别字幕", "Burn in live subtitles"),
+                                    tr("烧录实时识别字幕", "Burn in live subtitles"),
                                 );
                             }
                         });
                         ui.end_row();
 
-                        ui.label(self.t("保存到", "Save to"));
+                        ui.label(tr("保存到", "Save to"));
                         ui.horizontal(|ui| {
                             let dir = clips_dir(&self.s);
                             ui.label(RichText::new(dir.to_string_lossy()).color(MUTED).size(12.0));
-                            if ui.small_button(self.t("更改…", "Change…")).clicked() {
+                            if ui.small_button(tr("更改…", "Change…")).clicked() {
                                 if let Some(p) = rfd::FileDialog::new().set_directory(&dir).pick_folder() {
                                     self.s.clip_dir = p.to_string_lossy().to_string();
                                     self.s.save();
@@ -285,14 +286,12 @@ impl PlayerApp {
                     std::mem::swap(&mut self.ex.start, &mut self.ex.end);
                 }
                 let len = self.ex.end - self.ex.start;
-                let mut note = format!("{} {}", self.t("时长", "Length"), fmt_dur(len));
+                let mut note = format!("{} {}", tr("时长", "Length"), fmt_dur(len));
                 if self.ex.format == Format::Gif && len > 20.0 {
-                    note.push_str(self.t("，GIF 超过 20 秒文件会很大", " — GIFs over 20 s get large"));
+                    note.push_str(tr("，GIF 超过 20 秒文件会很大", " — GIFs over 20 s get large"));
                 }
                 if self.ex.subs == SubPick::Live {
-                    note.push_str(
-                        self.t("；实时字幕只含已识别的部分", "; live subtitles cover only what was recognised"),
-                    );
+                    note.push_str(tr("；实时字幕只含已识别的部分", "; live subtitles cover only what was recognised"));
                 }
                 ui.label(RichText::new(note).color(MUTED).size(12.5));
                 ui.add_space(6.0);
@@ -300,7 +299,7 @@ impl PlayerApp {
                 match &state {
                     State::Running(f) => {
                         ui.add(egui::ProgressBar::new(*f).show_percentage().animate(true));
-                        if ui.button(self.t("取消", "Cancel")).clicked() {
+                        if ui.button(tr("取消", "Cancel")).clicked() {
                             self.ex.job.cancel();
                         }
                     }
@@ -308,28 +307,26 @@ impl PlayerApp {
                         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                         ui.label(RichText::new(format!("✓ {name}")).color(ACCENT));
                         ui.horizontal(|ui| {
-                            if ui.button(self.t("打开所在文件夹", "Show in folder")).clicked() {
+                            if ui.button(tr("打开所在文件夹", "Show in folder")).clicked() {
                                 reveal(p);
                             }
-                            if ui.button(self.t("再导出一段", "Export another")).clicked() {
+                            if ui.button(tr("再导出一段", "Export another")).clicked() {
                                 self.ex.job.reset();
                             }
                         });
                     }
                     State::Failed(e) => {
                         ui.label(
-                            RichText::new(format!("{} {e}", self.t("导出失败：", "Export failed:")))
+                            RichText::new(format!("{} {e}", tr("导出失败：", "Export failed:")))
                                 .color(Color32::from_rgb(240, 110, 110)),
                         );
-                        if ui.button(self.t("重试", "Retry")).clicked() {
+                        if ui.button(tr("重试", "Retry")).clicked() {
                             go = true;
                         }
                     }
                     State::Idle => {
                         let ok = len >= 0.1;
-                        if ui
-                            .add_enabled(ok, egui::Button::new(menu_label(ic::FILM, self.t("导出", "Export"))))
-                            .clicked()
+                        if ui.add_enabled(ok, egui::Button::new(menu_label(ic::FILM, tr("导出", "Export")))).clicked()
                         {
                             go = true;
                         }
