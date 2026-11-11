@@ -1892,7 +1892,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpv-rust-player"
+name = "ok-player"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",

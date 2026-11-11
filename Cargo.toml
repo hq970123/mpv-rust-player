@@ -1,5 +1,5 @@
 [package]
-name = "mpv-rust-player"
+name = "ok-player"
 version = "0.1.0"
 edition = "2021"
 description = "High-performance local video player built on libmpv, with live speech recognition and translated subtitles"
