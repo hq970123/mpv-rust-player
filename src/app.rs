@@ -1,3 +1,4 @@
+mod export;
 mod extra;
 
 use crate::cast::{CastState, Caster, Device};
@@ -152,6 +153,7 @@ pub struct PlayerApp {
     x: extra::Extra,
     thumbs: crate::thumbs::Thumbs,
     inbox: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    ex: export::ExportUi,
 }
 
 impl PlayerApp {
@@ -191,6 +193,7 @@ impl PlayerApp {
             x: extra::Extra::default(),
             thumbs: crate::thumbs::Thumbs::new(cc.egui_ctx.clone()),
             inbox: None,
+            ex: export::ExportUi::default(),
         };
         #[cfg(target_os = "macos")]
         crate::macos_open::set_ctx(&cc.egui_ctx);
@@ -813,7 +816,8 @@ impl eframe::App for PlayerApp {
             let finder = crate::macos_open::take();
             if !finder.is_empty() {
                 // Several files from Finder become one playlist.
-                let (urls, files): (Vec<_>, Vec<_>) = finder.into_iter().partition(|p| p.to_string_lossy().contains("://"));
+                let (urls, files): (Vec<_>, Vec<_>) =
+                    finder.into_iter().partition(|p| p.to_string_lossy().contains("://"));
                 if !files.is_empty() {
                     self.open_many(files);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -866,6 +870,7 @@ impl eframe::App for PlayerApp {
             self.prefs_window(ctx);
         }
         self.extra_windows(ctx);
+        self.export_frame(ctx);
 
         #[cfg(not(target_os = "macos"))]
         if !fullscreen {
@@ -1365,6 +1370,27 @@ impl PlayerApp {
         self.extra_menu(ui, ctx);
         ui.separator();
         ui.menu_button(menu_label(ic::CAMERA, self.t("截图", "Snapshot")), |ui| self.snapshot_items(ui, ctx));
+        let sc = |m: Modifiers| ctx.format_shortcut(&egui::KeyboardShortcut::new(m, Key::E));
+        if ui
+            .add(
+                egui::Button::new(menu_label(ic::FILM, self.t("导出片段…", "Export clip…")))
+                    .shortcut_text(sc(Modifiers::COMMAND)),
+            )
+            .clicked()
+        {
+            ui.close_menu();
+            self.open_export(false);
+        }
+        if ui
+            .add(
+                egui::Button::new(menu_label(ic::FILM, self.t("导出 GIF…", "Export GIF…")))
+                    .shortcut_text(sc(Modifiers::COMMAND | Modifiers::SHIFT)),
+            )
+            .clicked()
+        {
+            ui.close_menu();
+            self.open_export(true);
+        }
         if ui.button(menu_label(ic::CAST, self.t("投屏…", "Cast…"))).clicked() {
             ui.close_menu();
             if !self.caster.discovery.searching.load(Ordering::Relaxed) {

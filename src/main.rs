@@ -2,6 +2,7 @@
 
 mod app;
 mod cast;
+mod clip;
 mod icons;
 mod live;
 #[cfg(target_os = "macos")]

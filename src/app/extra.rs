@@ -117,10 +117,10 @@ fn media_in_dir(dir: &Path) -> Vec<PathBuf> {
 }
 
 impl PlayerApp {
-    fn mp_f(&self, k: &str) -> f64 {
+    pub(super) fn mp_f(&self, k: &str) -> f64 {
         self.mpv.as_ref().and_then(|m| m.get_f64(k)).unwrap_or(0.0)
     }
-    fn mp_s(&self, k: &str) -> String {
+    pub(super) fn mp_s(&self, k: &str) -> String {
         self.mpv.as_ref().and_then(|m| m.get(k)).unwrap_or_default()
     }
 
@@ -449,7 +449,7 @@ impl PlayerApp {
         self.x.chapters.iter().rev().find(|c| c.0 <= t).map(|c| c.1.as_str())
     }
 
-    fn ab_points(&self) -> (Option<f64>, Option<f64>) {
+    pub(super) fn ab_points(&self) -> (Option<f64>, Option<f64>) {
         let a = self.mp_s("ab-loop-a").parse::<f64>().ok();
         let b = self.mp_s("ab-loop-b").parse::<f64>().ok();
         (a, b)
@@ -952,6 +952,12 @@ impl PlayerApp {
         if k(none, Key::Comma) && !self.casting() {
             self.cmd(&["frame-back-step"]);
         }
+        if k(ctrl | shift, Key::E) {
+            self.open_export(true);
+        }
+        if k(ctrl, Key::E) {
+            self.open_export(false);
+        }
         if k(none, Key::L) {
             self.ab_loop();
         }
@@ -1240,6 +1246,10 @@ impl PlayerApp {
                 ("C", self.t("实时识别翻译字幕", "Live subtitles")),
                 ("S / Shift+S", self.t("截图 / 另一种字幕模式截图", "Snapshot / other subtitle mode")),
                 ("Ctrl + C", self.t("复制当前画面", "Copy frame")),
+                (
+                    "Ctrl + E / Ctrl+Shift+E",
+                    self.t("导出片段 / GIF（默认用 A-B 区间）", "Export clip / GIF (uses A-B range)"),
+                ),
                 ("Ctrl + O", self.t("打开文件", "Open file")),
                 ("Ctrl + Shift + O", self.t("打开文件夹", "Open folder")),
                 ("Ctrl + U", self.t("打开网络地址", "Open URL")),

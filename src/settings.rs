@@ -76,6 +76,8 @@ pub struct Settings {
     /// Open files in the running window instead of a new one.
     pub single_instance: bool,
     pub seek_thumbs: bool,
+    /// Folder for exported clips / GIFs; empty = Videos/OK Player.
+    pub clip_dir: String,
 }
 
 impl Default for Settings {
@@ -108,6 +110,7 @@ impl Default for Settings {
             audio_norm: false,
             single_instance: true,
             seek_thumbs: true,
+            clip_dir: String::new(),
         }
     }
 }
