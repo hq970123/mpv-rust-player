@@ -2,6 +2,7 @@
 
 mod app;
 mod cast;
+mod chromecast;
 mod clip;
 mod icons;
 mod live;

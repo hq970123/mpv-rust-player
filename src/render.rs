@@ -84,11 +84,7 @@ unsafe impl Send for VideoRenderer {}
 
 impl VideoRenderer {
     /// Must be called with the GL context current (eframe's creation callback).
-    pub fn new(
-        mpv: &Mpv,
-        gpa: &dyn Fn(&CStr) -> *const c_void,
-        egui_ctx: eframe::egui::Context,
-    ) -> Arc<Mutex<Self>> {
+    pub fn new(mpv: &Mpv, gpa: &dyn Fn(&CStr) -> *const c_void, egui_ctx: eframe::egui::Context) -> Arc<Mutex<Self>> {
         // SAFETY: the borrowed loader is only used inside ensure_context()
         // below and cleared before this function returns.
         let borrowed: *const (dyn Fn(&CStr) -> *const c_void + '_) = gpa;
@@ -123,10 +119,7 @@ impl VideoRenderer {
         };
         let mut params = [
             MpvRenderParam { kind: RENDER_PARAM_API_TYPE, data: api_type.as_ptr() as *mut c_void },
-            MpvRenderParam {
-                kind: RENDER_PARAM_OPENGL_INIT_PARAMS,
-                data: &mut init as *mut _ as *mut c_void,
-            },
+            MpvRenderParam { kind: RENDER_PARAM_OPENGL_INIT_PARAMS, data: &mut init as *mut _ as *mut c_void },
             MpvRenderParam { kind: RENDER_PARAM_INVALID, data: std::ptr::null_mut() },
         ];
         let mut ctx = std::ptr::null_mut();

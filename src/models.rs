@@ -14,10 +14,34 @@ pub struct ModelInfo {
 }
 
 pub const MODELS: &[ModelInfo] = &[
-    ModelInfo { id: "tiny", file: "ggml-tiny.bin", size_mb: 75, note_zh: "最快，准确度一般", note_en: "Fastest, rough" },
-    ModelInfo { id: "base", file: "ggml-base.bin", size_mb: 142, note_zh: "推荐：速度与准确度平衡", note_en: "Recommended balance" },
-    ModelInfo { id: "small", file: "ggml-small.bin", size_mb: 466, note_zh: "更准，需较快 CPU", note_en: "More accurate, needs a fast CPU" },
-    ModelInfo { id: "medium", file: "ggml-medium.bin", size_mb: 1533, note_zh: "高准确度，较慢", note_en: "High accuracy, slow" },
+    ModelInfo {
+        id: "tiny",
+        file: "ggml-tiny.bin",
+        size_mb: 75,
+        note_zh: "最快，准确度一般",
+        note_en: "Fastest, rough",
+    },
+    ModelInfo {
+        id: "base",
+        file: "ggml-base.bin",
+        size_mb: 142,
+        note_zh: "推荐：速度与准确度平衡",
+        note_en: "Recommended balance",
+    },
+    ModelInfo {
+        id: "small",
+        file: "ggml-small.bin",
+        size_mb: 466,
+        note_zh: "更准，需较快 CPU",
+        note_en: "More accurate, needs a fast CPU",
+    },
+    ModelInfo {
+        id: "medium",
+        file: "ggml-medium.bin",
+        size_mb: 1533,
+        note_zh: "高准确度，较慢",
+        note_en: "High accuracy, slow",
+    },
     ModelInfo {
         id: "large-v3-turbo-q5",
         file: "ggml-large-v3-turbo-q5_0.bin",

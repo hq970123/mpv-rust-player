@@ -40,8 +40,58 @@ const DIRECT_VIDEO: &[&str] = &["h264", "hevc", "mpeg2video"];
 const DIRECT_AUDIO: &[&str] = &["aac", "mp3", "ac3", "eac3", "mp2"];
 const DIRECT_AUDIO_ONLY: &[&str] = &["aac", "mp3", "flac", "pcm_s16le", "pcm_s24le", "alac"];
 
-/// `Some(reason)` when the file should be transcoded for a typical DLNA TV.
-pub fn reason(p: &Probe) -> Option<String> {
+/// Which kind of receiver the stream is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Dlna,
+    Chromecast,
+}
+
+const CC_CONTAINERS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
+const CC_AUDIO_CONTAINERS: &[&str] = &["mp3", "m4a", "aac", "flac", "wav", "ogg", "oga", "opus", "webm", "mp4"];
+const CC_VIDEO: &[&str] = &["h264", "vp8"];
+const CC_AUDIO: &[&str] = &["aac", "mp3", "opus", "vorbis", "flac"];
+
+/// `Some(reason)` when the file should be transcoded for `target`.
+pub fn reason(p: &Probe, target: Target) -> Option<String> {
+    match target {
+        Target::Dlna => reason_dlna(p),
+        Target::Chromecast => reason_cast(p),
+    }
+}
+
+/// Every Chromecast generation: H.264 (8-bit 4:2:0) or VP8 with AAC/MP3/Opus/Vorbis/FLAC
+/// in MP4/WebM/MKV. HEVC, VP9 and AV1 only play on newer models, so they are converted.
+fn reason_cast(p: &Probe) -> Option<String> {
+    let codec = |c: &Option<String>| c.as_deref().unwrap_or("").to_ascii_lowercase();
+    let (v, a) = (codec(&p.vcodec), codec(&p.acodec));
+    if v.is_empty() {
+        if !CC_AUDIO_CONTAINERS.contains(&p.ext.as_str()) {
+            return Some(format!("container .{}", p.ext));
+        }
+        if !a.is_empty() && !CC_AUDIO.contains(&a.as_str()) && !a.starts_with("pcm_") {
+            return Some(a);
+        }
+        return None;
+    }
+    if !CC_CONTAINERS.contains(&p.ext.as_str()) {
+        return Some(format!("container .{}", p.ext));
+    }
+    if !CC_VIDEO.contains(&v.as_str()) {
+        return Some(v);
+    }
+    let deep =
+        p.pixfmt.contains("10") || p.pixfmt.contains("12") || p.pixfmt.contains("444") || p.pixfmt.contains("422");
+    if deep {
+        return Some(format!("{v} {}", p.pixfmt));
+    }
+    if !a.is_empty() && !CC_AUDIO.contains(&a.as_str()) {
+        return Some(a);
+    }
+    None
+}
+
+fn reason_dlna(p: &Probe) -> Option<String> {
     let codec = |c: &Option<String>| c.as_deref().unwrap_or("").to_ascii_lowercase();
     let (v, a) = (codec(&p.vcodec), codec(&p.acodec));
     if v.is_empty() {
@@ -60,7 +110,8 @@ pub fn reason(p: &Probe) -> Option<String> {
     if !DIRECT_VIDEO.contains(&v.as_str()) {
         return Some(v);
     }
-    let deep = p.pixfmt.contains("10") || p.pixfmt.contains("12") || p.pixfmt.contains("444") || p.pixfmt.contains("422");
+    let deep =
+        p.pixfmt.contains("10") || p.pixfmt.contains("12") || p.pixfmt.contains("444") || p.pixfmt.contains("422");
     if v == "h264" && deep {
         return Some(format!("h264 {}", p.pixfmt));
     }
@@ -82,6 +133,8 @@ pub struct Job {
     pub subs: Subs,
     pub encoders: Vec<String>,
     pub out: PathBuf,
+    /// Fragmented MP4 (for Chromecast) instead of MPEG-TS.
+    pub fmp4: bool,
 }
 
 /// True when this libmpv build can encode the cast stream at all.
@@ -100,7 +153,7 @@ pub fn options(job: &Job) -> Result<Vec<(String, String)>, String> {
     };
     // Low latency to first byte, regular keyframes for the TV's decoder.
     let vopts = if venc == "libx264" {
-        "preset=veryfast,crf=21,g=50,keyint_min=25,bf=0".to_string()
+        "preset=veryfast,crf=21,g=50,keyint_min=25,bf=0,profile=high,level=4.1".to_string()
     } else if venc == "mpeg4" {
         format!("{vopts},g=50")
     } else {
@@ -116,7 +169,7 @@ pub fn options(job: &Job) -> Result<Vec<(String, String)>, String> {
         ("idle".into(), "yes".into()),
         ("start".into(), format!("{:.3}", job.start.max(0.0))),
         ("o".into(), job.out.to_string_lossy().to_string()),
-        ("of".into(), "mpegts".into()),
+        ("of".into(), if job.fmp4 { "mp4" } else { "mpegts" }.into()),
         ("ovc".into(), venc.into()),
         ("ovcopts".into(), vopts),
         (
@@ -127,6 +180,10 @@ pub fn options(job: &Job) -> Result<Vec<(String, String)>, String> {
         ),
         ("audio-channels".into(), "stereo".into()),
     ];
+    if job.fmp4 {
+        // Playable while it is still being written.
+        o.push(("ofopts".into(), "movflags=+frag_keyframe+empty_moov+default_base_moof".into()));
+    }
     let aenc = if job.encoders.is_empty() { Some("aac") } else { clip::pick(&job.encoders, clip::AAC) };
     match aenc {
         Some(a) => {
@@ -309,6 +366,20 @@ fn fmt_srt(t: f64) -> String {
 
 /// Move every cue `by` seconds earlier, dropping cues that end before 0 and
 /// renumbering the rest. Used when a transcoded stream starts mid-file.
+/// SRT to WebVTT (what Chromecast reads).
+pub fn srt_to_vtt(srt: &str) -> String {
+    let mut out = String::from("WEBVTT\n\n");
+    for line in srt.replace("\r\n", "\n").lines() {
+        if line.contains("-->") {
+            out.push_str(&line.replace(',', "."));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 pub fn shift_srt(srt: &str, by: f64) -> String {
     if by <= 0.0 {
         return srt.to_string();
@@ -346,15 +417,30 @@ mod tests {
 
     #[test]
     fn decides() {
-        assert_eq!(reason(&probe("mp4", Some("h264"), Some("aac"), "yuv420p")), None);
-        assert_eq!(reason(&probe("mkv", Some("hevc"), Some("eac3"), "yuv420p10")), None);
-        assert!(reason(&probe("mkv", Some("vp9"), Some("opus"), "yuv420p")).is_some());
-        assert!(reason(&probe("mkv", Some("h264"), Some("dts"), "yuv420p")).is_some());
-        assert!(reason(&probe("mkv", Some("h264"), Some("aac"), "yuv420p10")).is_some());
-        assert!(reason(&probe("avi", Some("mpeg4"), Some("mp3"), "yuv420p")).is_some());
-        assert!(reason(&probe("webm", Some("av1"), None, "yuv420p")).is_some());
-        assert_eq!(reason(&probe("flac", None, Some("flac"), "")), None);
-        assert!(reason(&probe("ogg", None, Some("vorbis"), "")).is_some());
+        assert_eq!(reason_dlna(&probe("mp4", Some("h264"), Some("aac"), "yuv420p")), None);
+        assert_eq!(reason_dlna(&probe("mkv", Some("hevc"), Some("eac3"), "yuv420p10")), None);
+        assert!(reason_dlna(&probe("mkv", Some("vp9"), Some("opus"), "yuv420p")).is_some());
+        assert!(reason_dlna(&probe("mkv", Some("h264"), Some("dts"), "yuv420p")).is_some());
+        assert!(reason_dlna(&probe("mkv", Some("h264"), Some("aac"), "yuv420p10")).is_some());
+        assert!(reason_dlna(&probe("avi", Some("mpeg4"), Some("mp3"), "yuv420p")).is_some());
+        assert!(reason_dlna(&probe("webm", Some("av1"), None, "yuv420p")).is_some());
+        assert_eq!(reason_dlna(&probe("flac", None, Some("flac"), "")), None);
+        assert!(reason_dlna(&probe("ogg", None, Some("vorbis"), "")).is_some());
+    }
+
+    #[test]
+    fn decides_for_chromecast() {
+        let cc = |e, v, a, x| reason(&probe(e, v, a, x), Target::Chromecast);
+        assert_eq!(cc("mp4", Some("h264"), Some("aac"), "yuv420p"), None);
+        assert_eq!(cc("mkv", Some("h264"), Some("opus"), "yuv420p"), None);
+        assert_eq!(cc("webm", Some("vp8"), Some("vorbis"), "yuv420p"), None);
+        assert!(cc("mkv", Some("hevc"), Some("aac"), "yuv420p").is_some());
+        assert!(cc("webm", Some("vp9"), Some("opus"), "yuv420p").is_some());
+        assert!(cc("mp4", Some("h264"), Some("ac3"), "yuv420p").is_some());
+        assert!(cc("ts", Some("h264"), Some("aac"), "yuv420p").is_some());
+        assert!(cc("mp4", Some("h264"), Some("aac"), "yuv420p10").is_some());
+        assert_eq!(cc("ogg", None, Some("vorbis"), ""), None);
+        assert!(cc("wma", None, Some("wmav2"), "").is_some());
     }
 
     #[test]
@@ -366,6 +452,7 @@ mod tests {
             subs: Subs::Track(3),
             encoders: vec!["h264_videotoolbox".into(), "aac_at".into()],
             out: "/tmp/x.ts".into(),
+            fmp4: false,
         };
         let o = options(&job).unwrap();
         let get = |k: &str| o.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
@@ -376,6 +463,9 @@ mod tests {
         assert_eq!(get("aid").as_deref(), Some("2"));
         assert_eq!(get("sid").as_deref(), Some("3"));
         assert!(!can_encode(&["gif".into()]));
+        let o = options(&Job { fmp4: true, ..job.clone() }).unwrap();
+        assert!(o.iter().any(|(k, v)| k == "of" && v == "mp4"));
+        assert!(o.iter().any(|(k, v)| k == "ofopts" && v.contains("empty_moov")));
         assert!(options(&Job { encoders: vec!["gif".into()], ..job }).is_err());
     }
 
@@ -385,5 +475,9 @@ mod tests {
         let s = shift_srt(srt, 30.0);
         assert_eq!(s, "1\n00:00:30,500 --> 00:00:32,000\nhello\nworld\n\n");
         assert_eq!(shift_srt(srt, 0.0), srt);
+        assert_eq!(
+            srt_to_vtt("1\n00:00:01,000 --> 00:00:02,500\nhi\n"),
+            "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.500\nhi\n"
+        );
     }
 }

@@ -550,8 +550,18 @@ fn is_noise(t: &str) -> bool {
     }
     let l = t.to_lowercase();
     const JUNK: &[&str] = &[
-        "[music]", "(music)", "[音乐]", "[blank_audio]", "(applause)", "thank you for watching",
-        "thanks for watching", "amara.org", "字幕由", "请不吝点赞", "订阅", "subtitles by",
+        "[music]",
+        "(music)",
+        "[音乐]",
+        "[blank_audio]",
+        "(applause)",
+        "thank you for watching",
+        "thanks for watching",
+        "amara.org",
+        "字幕由",
+        "请不吝点赞",
+        "订阅",
+        "subtitles by",
     ];
     JUNK.iter().any(|j| l.contains(j))
 }
@@ -559,10 +569,7 @@ fn is_noise(t: &str) -> bool {
 // ---------------------------------------------------------------- translation
 
 fn translator(rx: Arc<Mutex<Receiver<TransJob>>>, shared: Arc<Shared>, ctx: eframe::egui::Context) {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .expect("http client");
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).build().expect("http client");
     loop {
         let job = match rx.lock().unwrap().recv() {
             Ok(j) => j,
@@ -618,8 +625,5 @@ pub fn translate(client: &reqwest::blocking::Client, cfg: &Config, text: &str) -
         let msg = v["error"]["message"].as_str().unwrap_or("request failed");
         return Err(format!("HTTP {status}: {msg}"));
     }
-    v["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.trim().to_string())
-        .ok_or_else(|| "empty response".into())
+    v["choices"][0]["message"]["content"].as_str().map(|s| s.trim().to_string()).ok_or_else(|| "empty response".into())
 }

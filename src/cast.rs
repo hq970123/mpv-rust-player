@@ -1,4 +1,5 @@
-//! Casting to TVs and boxes over DLNA / UPnP AV.
+//! Casting to TVs and boxes over DLNA / UPnP AV, and to Google Cast devices
+//! (see `chromecast`; they share the media server and the session loop).
 //!
 //!   discovery  — SSDP M-SEARCH for MediaRenderer devices, then each device's
 //!                description XML for its AVTransport / RenderingControl URLs,
@@ -35,6 +36,14 @@ pub struct Device {
     pub location: String,
     pub avt_url: String,
     pub rc_url: Option<String>,
+    /// Set for a Google Cast device (its CASTV2 address); DLNA otherwise.
+    pub chromecast: Option<SocketAddr>,
+}
+
+impl Device {
+    pub fn is_chromecast(&self) -> bool {
+        self.chromecast.is_some()
+    }
 }
 
 // ------------------------------------------------------------------ discovery
@@ -46,12 +55,36 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    /// Search the LAN for ~3 s on a background thread; results stream into `devices`.
+    fn add(&self, d: Device, ctx: &eframe::egui::Context) {
+        let mut list = self.devices.lock().unwrap();
+        if !list.iter().any(|x| x.location == d.location || (!d.avt_url.is_empty() && x.avt_url == d.avt_url)) {
+            list.push(d);
+            list.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        ctx.request_repaint();
+    }
+
+    /// Search the LAN for ~3 s on background threads (SSDP for DLNA, mDNS for
+    /// Google Cast); results stream into `devices`.
     pub fn search(self: &Arc<Self>, ctx: eframe::egui::Context) {
         if self.searching.swap(true, Ordering::SeqCst) {
             return;
         }
         let me = self.clone();
+        let (me2, ctx2) = (self.clone(), ctx.clone());
+        let mdns = std::thread::spawn(move || {
+            crate::chromecast::discover(Duration::from_millis(3000), |f| {
+                let d = Device {
+                    name: f.name,
+                    model: f.model,
+                    location: format!("cast://{}", f.addr),
+                    avt_url: String::new(),
+                    rc_url: None,
+                    chromecast: Some(f.addr),
+                };
+                me2.add(d, &ctx2);
+            });
+        });
         std::thread::spawn(move || {
             let mut seen: Vec<String> = me.devices.lock().unwrap().iter().map(|d| d.location.clone()).collect();
             let found = ssdp_search(Duration::from_millis(3000));
@@ -61,14 +94,10 @@ impl Discovery {
                 }
                 seen.push(loc.clone());
                 if let Some(d) = describe(&loc) {
-                    let mut list = me.devices.lock().unwrap();
-                    if !list.iter().any(|x| x.avt_url == d.avt_url) {
-                        list.push(d);
-                        list.sort_by(|a, b| a.name.cmp(&b.name));
-                    }
-                    ctx.request_repaint();
+                    me.add(d, &ctx);
                 }
             }
+            let _ = mdns.join();
             me.searching.store(false, Ordering::SeqCst);
             ctx.request_repaint();
         });
@@ -138,6 +167,7 @@ fn describe(location: &str) -> Option<Device> {
         location: location.to_string(),
         avt_url: avt?,
         rc_url: rc,
+        chromecast: None,
     })
 }
 
@@ -289,6 +319,12 @@ fn serve(mut conn: TcpStream, served: &Arc<Mutex<Served>>) -> std::io::Result<()
         }
     }
     let head_only = method.eq_ignore_ascii_case("HEAD");
+    if method.eq_ignore_ascii_case("OPTIONS") {
+        // CORS preflight from the Chromecast receiver page.
+        return conn.write_all(
+            b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, HEAD, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+    }
 
     let (media, token, sub, live, sent, sub_offset) = {
         let s = served.lock().unwrap();
@@ -298,9 +334,14 @@ fn serve(mut conn: TcpStream, served: &Arc<Mutex<Served>>) -> std::io::Result<()
 
     if path.starts_with(&format!("/sub/{token}")) {
         let Some(f) = sub else { return not_found(&mut conn) };
-        let body = crate::transcode::shift_srt(&f(), sub_offset).into_bytes();
+        let srt = crate::transcode::shift_srt(&f(), sub_offset);
+        let (body, ctype) = if path.ends_with(".vtt") {
+            (crate::transcode::srt_to_vtt(&srt).into_bytes(), "text/vtt")
+        } else {
+            (srt.into_bytes(), "text/srt")
+        };
         let h = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/srt; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\ntransferMode.dlna.org: Interactive\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: {ctype}; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\ntransferMode.dlna.org: Interactive\r\nConnection: close\r\n\r\n",
             body.len()
         );
         conn.write_all(h.as_bytes())?;
@@ -333,14 +374,17 @@ fn serve(mut conn: TcpStream, served: &Arc<Mutex<Served>>) -> std::io::Result<()
         }
     }
     if start > end || start >= size {
-        let h = format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{size}\r\nConnection: close\r\n\r\n");
+        let h =
+            format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{size}\r\nConnection: close\r\n\r\n");
         return conn.write_all(h.as_bytes());
     }
     let len = end - start + 1;
     let mime = mime_for(&media);
     let mut h = String::new();
     h.push_str(if partial { "HTTP/1.1 206 Partial Content\r\n" } else { "HTTP/1.1 200 OK\r\n" });
-    h.push_str(&format!("Content-Type: {mime}\r\nContent-Length: {len}\r\nAccept-Ranges: bytes\r\n"));
+    h.push_str(&format!(
+        "Content-Type: {mime}\r\nContent-Length: {len}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\n"
+    ));
     if partial {
         h.push_str(&format!("Content-Range: bytes {start}-{end}/{size}\r\n"));
     }
@@ -383,8 +427,9 @@ fn serve_growing(
     has_sub: bool,
     host: &str,
 ) -> std::io::Result<()> {
+    let mime = if media.extension().is_some_and(|e| e == "mp4") { "video/mp4" } else { LIVE_MIME };
     let mut h = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {LIVE_MIME}\r\ntransferMode.dlna.org: Streaming\r\ncontentFeatures.dlna.org: {LIVE_FLAGS}\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nAccess-Control-Allow-Origin: *\r\ntransferMode.dlna.org: Streaming\r\ncontentFeatures.dlna.org: {LIVE_FLAGS}\r\n"
     );
     if has_sub && !host.is_empty() {
         h.push_str(&format!("CaptionInfo.sec: http://{host}/sub/{token}.srt\r\n"));
@@ -439,11 +484,7 @@ fn not_found(conn: &mut TcpStream) -> std::io::Result<()> {
 fn local_ip_towards(device_url: &str) -> Option<IpAddr> {
     let host_port = origin(device_url);
     let hp = host_port.split("://").nth(1)?;
-    let addr: SocketAddr = if hp.contains(':') {
-        hp.parse().ok()?
-    } else {
-        format!("{hp}:80").parse().ok()?
-    };
+    let addr: SocketAddr = if hp.contains(':') { hp.parse().ok()? } else { format!("{hp}:80").parse().ok()? };
     let s = UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect(addr).ok()?;
     Some(s.local_addr().ok()?.ip())
@@ -634,16 +675,175 @@ fn avt(d: &Device, action: &str, args: &str) -> Result<String, String> {
     soap(&d.avt_url, AVT, action, args)
 }
 
+/// The device a session is talking to.
+enum Remote {
+    Dlna(Device),
+    Cast(Device, Box<crate::chromecast::Conn>),
+}
+
+/// One poll's findings, whatever the protocol.
+#[derive(Default)]
+struct Polled {
+    state: Option<CastState>,
+    pos: Option<f64>,
+    dur: Option<f64>,
+    /// 0..100
+    volume: Option<f64>,
+}
+
+impl Remote {
+    fn device(&self) -> &Device {
+        match self {
+            Remote::Dlna(d) | Remote::Cast(d, _) => d,
+        }
+    }
+    fn play(&mut self) -> Result<(), String> {
+        match self {
+            Remote::Dlna(d) => avt(d, "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>").map(|_| ()),
+            Remote::Cast(_, c) => c.play(),
+        }
+    }
+    fn pause(&mut self) -> Result<(), String> {
+        match self {
+            Remote::Dlna(d) => avt(d, "Pause", "<InstanceID>0</InstanceID>").map(|_| ()),
+            Remote::Cast(_, c) => c.pause(),
+        }
+    }
+    fn seek(&mut self, t: f64) {
+        match self {
+            Remote::Dlna(d) => {
+                let _ = avt(
+                    d,
+                    "Seek",
+                    &format!("<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>{}</Target>", hms(t)),
+                );
+            }
+            Remote::Cast(_, c) => {
+                let _ = c.seek(t);
+            }
+        }
+    }
+    /// `v` 0..100
+    fn volume(&mut self, v: u32) {
+        match self {
+            Remote::Dlna(d) => {
+                if let Some(rc) = &d.rc_url {
+                    let _ = soap(
+                        rc,
+                        RC,
+                        "SetVolume",
+                        &format!(
+                            "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>{v}</DesiredVolume>"
+                        ),
+                    );
+                }
+            }
+            Remote::Cast(_, c) => {
+                let _ = c.set_volume(v as f64 / 100.0);
+            }
+        }
+    }
+    fn stop(&mut self) {
+        match self {
+            Remote::Dlna(d) => {
+                let _ = avt(d, "Stop", "<InstanceID>0</InstanceID>");
+            }
+            Remote::Cast(_, c) => c.stop(),
+        }
+    }
+    fn current_volume(&mut self) -> Option<f64> {
+        match self {
+            Remote::Dlna(d) => {
+                let rc = d.rc_url.as_ref()?;
+                let x = soap(rc, RC, "GetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel>").ok()?;
+                tag(&x, "CurrentVolume").and_then(|v| v.parse::<f64>().ok())
+            }
+            Remote::Cast(_, c) => c.volume.map(|l| l * 100.0),
+        }
+    }
+    /// `was`: the state before this poll (a stop only counts once something played).
+    fn poll(&mut self, was: &CastState, want_pos: bool) -> Polled {
+        let mut p = Polled::default();
+        let played = matches!(was, CastState::Playing | CastState::Paused);
+        match self {
+            Remote::Dlna(d) => {
+                if let Ok(x) = avt(d, "GetTransportInfo", "<InstanceID>0</InstanceID>") {
+                    p.state = match tag(&x, "CurrentTransportState").unwrap_or_default().as_str() {
+                        "PLAYING" => Some(CastState::Playing),
+                        "PAUSED_PLAYBACK" | "PAUSED" => Some(CastState::Paused),
+                        "TRANSITIONING" => Some(CastState::Buffering),
+                        "STOPPED" | "NO_MEDIA_PRESENT" => played.then_some(CastState::Stopped),
+                        _ => None,
+                    };
+                }
+                if want_pos {
+                    if let Ok(x) = avt(d, "GetPositionInfo", "<InstanceID>0</InstanceID>") {
+                        p.pos = tag(&x, "RelTime").and_then(|s| parse_hms(&s));
+                        p.dur = tag(&x, "TrackDuration").and_then(|s| parse_hms(&s)).filter(|t| *t > 0.0);
+                    }
+                }
+            }
+            Remote::Cast(_, c) => match c.poll() {
+                Ok(s) => {
+                    use crate::chromecast::Player;
+                    p.state = match s.state {
+                        Some(Player::Playing) => Some(CastState::Playing),
+                        Some(Player::Paused) => Some(CastState::Paused),
+                        Some(Player::Buffering) => Some(CastState::Buffering),
+                        Some(Player::Idle(r)) if r == "ERROR" => {
+                            Some(CastState::Error("Cast: playback error on the device".into()))
+                        }
+                        Some(Player::Idle(r)) if r == "FINISHED" || played => Some(CastState::Stopped),
+                        _ => None,
+                    };
+                    if let Some(e) = s.error {
+                        p.state = Some(CastState::Error(e));
+                    } else if s.closed {
+                        p.state = Some(CastState::Stopped);
+                    }
+                    if want_pos {
+                        p.pos = s.pos;
+                    }
+                    p.dur = s.dur;
+                    p.volume = s.volume.map(|l| l * 100.0);
+                }
+                Err(e) => p.state = Some(CastState::Error(e)),
+            },
+        }
+        p
+    }
+}
+
+/// Content type for the Default Media Receiver (it checks it with canPlayType).
+fn cast_mime(path: &std::path::Path) -> &'static str {
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "m4a" | "aac" => "audio/mp4",
+        "flac" => "audio/flac",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "wav" => "audio/wav",
+        _ => "video/mp4",
+    }
+}
+
 /// Point the server at the media (starting the transcoder if needed) and tell
-/// the device to play it from `start`.
+/// the device to play it from `start`. `prev` is reused when it is a Cast
+/// connection to the same device.
 fn begin(
     a: &StartArgs,
     start: f64,
     server: &MediaServer,
     st: &CastStatus,
     ctx: &eframe::egui::Context,
-) -> Result<Option<crate::transcode::Transcoder>, String> {
-    let ip = local_ip_towards(&a.device.avt_url).ok_or("no network route to device")?;
+    prev: Option<Remote>,
+) -> Result<(Remote, Option<crate::transcode::Transcoder>), String> {
+    let toward = match a.device.chromecast {
+        Some(addr) => format!("http://{addr}"),
+        None => a.device.avt_url.clone(),
+    };
+    let ip = local_ip_towards(&toward).ok_or("no network route to device")?;
     let token = new_token();
     let host = match ip {
         IpAddr::V4(v) => format!("{v}:{}", server.port),
@@ -653,7 +853,8 @@ fn begin(
     let (url, mime, flags, size) = if let Some(job) = &a.transcode {
         let mut job = job.clone();
         job.start = start;
-        job.out = crate::transcode::temp_dir().join(format!("{token}.ts"));
+        let ext = if job.fmp4 { "mp4" } else { "ts" };
+        job.out = crate::transcode::temp_dir().join(format!("{token}.{ext}"));
         let sent = Arc::new(AtomicU64::new(0));
         let t = crate::transcode::Transcoder::start(job, sent.clone());
         {
@@ -668,7 +869,8 @@ fn begin(
         ctx.request_repaint();
         t.wait_ready(Duration::from_secs(45))?;
         tc = Some(t);
-        (format!("http://{host}/media/{token}.ts"), LIVE_MIME, LIVE_FLAGS, 0)
+        let mime = if ext == "mp4" { "video/mp4" } else { LIVE_MIME };
+        (format!("http://{host}/media/{token}.{ext}"), mime, LIVE_FLAGS, 0)
     } else {
         {
             let mut sv = server.served.lock().unwrap();
@@ -681,6 +883,35 @@ fn begin(
         let size = std::fs::metadata(&a.media).map(|m| m.len()).unwrap_or(0);
         (format!("http://{host}/media/{token}.{ext}"), mime_for(&a.media), DLNA_FLAGS, size)
     };
+
+    if let Some(addr) = a.device.chromecast {
+        let mut conn = match prev {
+            Some(Remote::Cast(d, c)) if d.chromecast == Some(addr) => c,
+            _ => {
+                let mut c = crate::chromecast::Conn::connect(addr)?;
+                c.launch()?;
+                Box::new(c)
+            }
+        };
+        let sub_url = a.has_sub.then(|| format!("http://{host}/sub/{token}.vtt"));
+        let mime = if tc.is_some() { "video/mp4" } else { cast_mime(&a.media) };
+        let from = if tc.is_some() { 0.0 } else { start };
+        if let Err(e) = conn.load(&url, mime, &a.title, from, sub_url.as_deref()) {
+            // The receiver app may have been closed on the TV since: relaunch once.
+            if conn.launch().is_err() {
+                return Err(e);
+            }
+            conn.load(&url, mime, &a.title, from, sub_url.as_deref())?;
+        }
+        st.set_state(CastState::Buffering);
+        return Ok((Remote::Cast(a.device.clone(), conn), tc));
+    }
+
+    if let Some(mut p) = prev {
+        if p.device().location != a.device.location {
+            p.stop();
+        }
+    }
     let sub_url = a.has_sub.then(|| format!("http://{host}/sub/{token}.srt"));
     let meta = didl(&a.title, &url, mime, flags, size, sub_url.as_deref());
     let _ = avt(&a.device, "Stop", "<InstanceID>0</InstanceID>");
@@ -700,11 +931,11 @@ fn begin(
         })
         .and_then(|_| avt(&a.device, "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>"))?;
     st.set_state(CastState::Buffering);
-    Ok(tc)
+    Ok((Remote::Dlna(a.device.clone()), tc))
 }
 
 fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServer>>, ctx: eframe::egui::Context) {
-    let mut dev: Option<Device> = None;
+    let mut dev: Option<Remote> = None;
     let mut args: Option<StartArgs> = None;
     let mut tc: Option<crate::transcode::Transcoder> = None;
     // Source time at which the served stream starts (transcoding only).
@@ -721,15 +952,22 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
         let cmd = match next {
             Ok(c) => Some(c),
             Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Disconnected) => {
+                if let Some(mut d) = dev.take() {
+                    d.stop();
+                }
+                return;
+            }
         };
         // Start, or restart a transcoded stream at a new position.
         let mut launch: Option<(StartArgs, f64)> = None;
         match cmd {
             Some(Cmd::Start(a, start)) => {
-                if let Some(old) = dev.take() {
-                    if old.avt_url != a.device.avt_url {
-                        let _ = avt(&old, "Stop", "<InstanceID>0</InstanceID>");
+                if let Some(mut old) = dev.take() {
+                    if old.device().location != a.device.location {
+                        old.stop();
+                    } else {
+                        dev = Some(old); // reused by `begin`
                     }
                 }
                 st.set_state(CastState::Connecting);
@@ -738,15 +976,15 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
                 launch = Some((a, start));
             }
             Some(Cmd::Play) => {
-                if let Some(d) = &dev {
-                    if avt(d, "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>").is_ok() {
+                if let Some(d) = dev.as_mut() {
+                    if d.play().is_ok() {
                         st.set_state(CastState::Playing);
                     }
                 }
             }
             Some(Cmd::Pause) => {
-                if let Some(d) = &dev {
-                    if avt(d, "Pause", "<InstanceID>0</InstanceID>").is_ok() {
+                if let Some(d) = dev.as_mut() {
+                    if d.pause().is_ok() {
                         st.set_state(CastState::Paused);
                     }
                 }
@@ -764,24 +1002,19 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
                     if let Some(a) = args.clone() {
                         launch = Some((a, t));
                     }
-                } else if let Some(d) = &dev {
-                    let _ = avt(d, "Seek", &format!("<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>{}</Target>", hms(t)));
+                } else if let Some(d) = dev.as_mut() {
+                    d.seek(t);
                     seek_guard = Instant::now();
                 }
             }
             Some(Cmd::Volume(v)) => {
-                if let Some(rc) = dev.as_ref().and_then(|d| d.rc_url.clone()) {
-                    let _ = soap(
-                        &rc,
-                        RC,
-                        "SetVolume",
-                        &format!("<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>{v}</DesiredVolume>"),
-                    );
+                if let Some(d) = dev.as_mut() {
+                    d.volume(v);
                 }
             }
             Some(Cmd::Stop) => {
-                if let Some(d) = dev.take() {
-                    let _ = avt(&d, "Stop", "<InstanceID>0</InstanceID>");
+                if let Some(mut d) = dev.take() {
+                    d.stop();
                 }
                 tc = None;
                 args = None;
@@ -808,21 +1041,17 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
                 st.set_state(CastState::Error("media server unavailable".into()));
                 continue;
             };
-            match begin(&a, start, server, &st, &ctx) {
-                Ok(t) => {
+            match begin(&a, start, server, &st, &ctx, dev.take()) {
+                Ok((mut r, t)) => {
                     offset = if t.is_some() { start } else { 0.0 };
-                    if t.is_none() && start > 2.0 {
+                    if t.is_none() && start > 2.0 && matches!(r, Remote::Dlna(_)) {
                         pending_seek = Some((start, Instant::now()));
                     }
                     tc = t;
-                    if let Some(rc) = &a.device.rc_url {
-                        if let Ok(x) = soap(rc, RC, "GetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel>") {
-                            if let Some(v) = tag(&x, "CurrentVolume").and_then(|v| v.parse::<f64>().ok()) {
-                                st.volume.store(v.to_bits(), Ordering::Relaxed);
-                            }
-                        }
+                    if let Some(v) = r.current_volume() {
+                        st.volume.store(v.to_bits(), Ordering::Relaxed);
                     }
-                    dev = Some(a.device.clone());
+                    dev = Some(r);
                     args = Some(a);
                     seek_guard = Instant::now();
                 }
@@ -836,56 +1065,41 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
         }
 
         // poll position / transport state once a second
-        let Some(d) = dev.clone() else { continue };
+        let Some(d) = dev.as_mut() else { continue };
         if last_poll.elapsed() < Duration::from_millis(1000) {
             continue;
         }
         last_poll = Instant::now();
         if let Some(e) = tc.as_ref().and_then(|t| t.error.lock().unwrap().clone()) {
-            let _ = avt(&d, "Stop", "<InstanceID>0</InstanceID>");
+            d.stop();
             dev = None;
             tc = None;
             st.set_state(CastState::Error(e));
             ctx.request_repaint();
             continue;
         }
-        if let Ok(x) = avt(&d, "GetTransportInfo", "<InstanceID>0</InstanceID>") {
-            let s = tag(&x, "CurrentTransportState").unwrap_or_default();
-            let new = match s.as_str() {
-                "PLAYING" => Some(CastState::Playing),
-                "PAUSED_PLAYBACK" | "PAUSED" => Some(CastState::Paused),
-                "TRANSITIONING" => Some(CastState::Buffering),
-                "STOPPED" | "NO_MEDIA_PRESENT" => {
-                    // Treat as finished only once it has actually played.
-                    matches!(st.state(), CastState::Playing | CastState::Paused).then_some(CastState::Stopped)
-                }
-                _ => None,
-            };
-            if let Some(n) = new {
-                if n == CastState::Stopped {
-                    dev = None;
-                    tc = None;
-                }
-                st.set_state(n);
+        let p = d.poll(&st.state(), seek_guard.elapsed() > Duration::from_millis(1500));
+        if let Some(n) = p.state {
+            if matches!(n, CastState::Stopped | CastState::Error(_)) {
+                dev = None;
+                tc = None;
             }
+            st.set_state(n);
         }
-        if seek_guard.elapsed() > Duration::from_millis(1500) {
-            if let Ok(x) = avt(&d, "GetPositionInfo", "<InstanceID>0</InstanceID>") {
-                if let Some(p) = tag(&x, "RelTime").and_then(|s| parse_hms(&s)) {
-                    st.pos.store((offset + p).to_bits(), Ordering::Relaxed);
-                }
-                // A growing stream has no meaningful duration; the app keeps the local one.
-                if tc.is_none() {
-                    if let Some(t) = tag(&x, "TrackDuration").and_then(|s| parse_hms(&s)).filter(|t| *t > 0.0) {
-                        st.dur.store(t.to_bits(), Ordering::Relaxed);
-                    }
-                }
-            }
+        if let Some(pos) = p.pos {
+            st.pos.store((offset + pos).to_bits(), Ordering::Relaxed);
         }
-        if let Some((t, at)) = pending_seek {
+        // A growing stream has no meaningful duration; the app keeps the local one.
+        if let (Some(t), true) = (p.dur, tc.is_none()) {
+            st.dur.store(t.to_bits(), Ordering::Relaxed);
+        }
+        if let Some(v) = p.volume {
+            st.volume.store(v.to_bits(), Ordering::Relaxed);
+        }
+        if let (Some((t, at)), Some(d)) = (pending_seek, dev.as_mut()) {
             if st.state() == CastState::Playing || at.elapsed() > Duration::from_secs(8) {
                 pending_seek = None;
-                let _ = avt(&d, "Seek", &format!("<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>{}</Target>", hms(t)));
+                d.seek(t);
                 seek_guard = Instant::now();
                 st.pos.store(t.to_bits(), Ordering::Relaxed);
             }
@@ -908,8 +1122,14 @@ mod tests {
         assert_eq!(svcs.len(), 2);
         let base = tag(xml, "URLBase").unwrap();
         let loc = "http://192.168.1.5:49152/description.xml";
-        assert_eq!(join_url(&base, loc, "/upnp/control/AVTransport1"), "http://192.168.1.5:49152/upnp/control/AVTransport1");
-        assert_eq!(join_url(&base, loc, "upnp/control/RenderingControl1"), "http://192.168.1.5:49152/upnp/control/RenderingControl1");
+        assert_eq!(
+            join_url(&base, loc, "/upnp/control/AVTransport1"),
+            "http://192.168.1.5:49152/upnp/control/AVTransport1"
+        );
+        assert_eq!(
+            join_url(&base, loc, "upnp/control/RenderingControl1"),
+            "http://192.168.1.5:49152/upnp/control/RenderingControl1"
+        );
         let base2 = origin(loc);
         assert_eq!(join_url(&base2, loc, "ctl"), "http://192.168.1.5:49152/ctl");
     }

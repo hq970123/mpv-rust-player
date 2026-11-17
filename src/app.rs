@@ -532,16 +532,27 @@ impl PlayerApp {
             return;
         };
         let pos = if self.casting() { self.caster.status.pos() } else { self.st.time };
-        let why = if force_transcode { Some("manual".to_string()) } else { self.cast_transcode_reason(&path) };
+        let target =
+            if device.is_chromecast() { crate::transcode::Target::Chromecast } else { crate::transcode::Target::Dlna };
+        let why = if force_transcode { Some("manual".to_string()) } else { self.cast_transcode_reason(&path, target) };
         let mut job = None;
         if let Some(why) = &why {
-            let encoders = self.mpv.as_ref().and_then(|m| m.get("encoder-list")).map(|j| crate::clip::parse_encoders(&j));
+            let encoders =
+                self.mpv.as_ref().and_then(|m| m.get("encoder-list")).map(|j| crate::clip::parse_encoders(&j));
             let encoders = encoders.unwrap_or_default();
             if crate::transcode::can_encode(&encoders) {
-                job = Some(self.cast_transcode_job(&path, encoders));
-                self.toast(format!("{} ({why})", self.t("电视可能不支持此格式，正在转码投屏", "Transcoding for the TV")));
+                let mut j = self.cast_transcode_job(&path, encoders);
+                j.fmp4 = target == crate::transcode::Target::Chromecast;
+                job = Some(j);
+                self.toast(format!(
+                    "{} ({why})",
+                    self.t("电视可能不支持此格式，正在转码投屏", "Transcoding for the TV")
+                ));
             } else {
-                self.toast(self.t("这个 libmpv 不带 H.264 编码器，改为直接投屏", "No H.264 encoder in libmpv; casting the file as is"));
+                self.toast(self.t(
+                    "这个 libmpv 不带 H.264 编码器，改为直接投屏",
+                    "No H.264 encoder in libmpv; casting the file as is",
+                ));
             }
         }
         // Burned-in tracks need no sidecar; live subtitles still go as SRT.
@@ -556,14 +567,18 @@ impl PlayerApp {
     }
 
     /// Why the open file should be transcoded for the TV, per the setting.
-    fn cast_transcode_reason(&self, path: &std::path::Path) -> Option<String> {
+    fn cast_transcode_reason(&self, path: &std::path::Path, target: crate::transcode::Target) -> Option<String> {
         use crate::transcode::Mode;
         match self.s.cast_transcode {
             Mode::Never => None,
             Mode::Always => Some("always".into()),
             Mode::Auto => {
                 let codec = |kind: &str| {
-                    self.tracks.iter().find(|t| t.kind == kind && t.selected).map(|t| t.codec.clone()).filter(|c| !c.is_empty())
+                    self.tracks
+                        .iter()
+                        .find(|t| t.kind == kind && t.selected)
+                        .map(|t| t.codec.clone())
+                        .filter(|c| !c.is_empty())
                 };
                 let probe = crate::transcode::Probe {
                     ext: path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default(),
@@ -571,7 +586,7 @@ impl PlayerApp {
                     acodec: codec("audio"),
                     pixfmt: self.mp_s("video-params/pixelformat"),
                 };
-                crate::transcode::reason(&probe)
+                crate::transcode::reason(&probe, target)
             }
         }
     }
@@ -595,6 +610,7 @@ impl PlayerApp {
             subs,
             encoders,
             out: Default::default(),
+            fmp4: false,
         }
     }
 
@@ -1547,7 +1563,10 @@ impl PlayerApp {
             ui.separator();
             if !self.caster.status.transcoding.load(Ordering::Relaxed)
                 && ui
-                    .button(menu_label(ic::REFRESH, self.t("画面或声音不对？改为转码投屏", "No picture or sound? Transcode")))
+                    .button(menu_label(
+                        ic::REFRESH,
+                        self.t("画面或声音不对？改为转码投屏", "No picture or sound? Transcode"),
+                    ))
                     .clicked()
             {
                 ui.close_menu();
@@ -1561,7 +1580,11 @@ impl PlayerApp {
             return;
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new(self.t("投屏到（DLNA）", "Cast to (DLNA)")).color(MUTED).size(12.5));
+            ui.label(
+                RichText::new(self.t("投屏到（DLNA / Chromecast）", "Cast to (DLNA / Chromecast)"))
+                    .color(MUTED)
+                    .size(12.5),
+            );
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 let searching = self.caster.discovery.searching.load(Ordering::Relaxed);
                 if searching {
@@ -1581,10 +1604,11 @@ impl PlayerApp {
             ui.add(egui::Label::new(RichText::new(msg).size(13.0).color(MUTED)).wrap());
         }
         for d in devices {
+            let icon = if d.is_chromecast() { ic::CAST } else { ic::TV };
             let label = if d.model.is_empty() || d.model == d.name {
-                format!("{}   {}", ic::TV, d.name)
+                format!("{}   {}", icon, d.name)
             } else {
-                format!("{}   {}  ·  {}", ic::TV, d.name, d.model)
+                format!("{}   {}  ·  {}", icon, d.name, d.model)
             };
             if ui.button(label).clicked() {
                 ui.close_menu();
