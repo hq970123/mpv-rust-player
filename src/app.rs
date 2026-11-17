@@ -869,7 +869,8 @@ impl eframe::App for PlayerApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
-        let inbox: Vec<Option<PathBuf>> = self.inbox.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
+        #[allow(unused_mut)]
+        let mut inbox: Vec<Option<PathBuf>> = self.inbox.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
         #[cfg(target_os = "macos")]
         {
             let finder = crate::macos_open::take();
