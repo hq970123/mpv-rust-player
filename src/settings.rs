@@ -67,6 +67,8 @@ pub struct Settings {
     pub shot_copy: bool,
     /// Send live / loaded subtitles along when casting.
     pub cast_subs: bool,
+    /// Convert formats the TV can't play while casting.
+    pub cast_transcode: crate::transcode::Mode,
     pub loop_mode: LoopMode,
     /// Resume files where they were left.
     pub resume: bool,
@@ -104,6 +106,7 @@ impl Default for Settings {
             shot_with_subs: false,
             shot_copy: false,
             cast_subs: true,
+            cast_transcode: crate::transcode::Mode::Auto,
             loop_mode: LoopMode::Off,
             resume: true,
             audio_eq: "off".into(),

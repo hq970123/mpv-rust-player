@@ -124,12 +124,12 @@ pub fn parse_encoders(json: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn pick<'a>(have: &[String], prefs: &[&'a str]) -> Option<&'a str> {
+pub fn pick<'a>(have: &[String], prefs: &[&'a str]) -> Option<&'a str> {
     prefs.iter().copied().find(|p| have.iter().any(|h| h == p))
 }
 
 /// H.264 encoders in order of preference, with their options.
-const H264: &[(&str, &str)] = &[
+pub const H264: &[(&str, &str)] = &[
     ("libx264", "preset=veryfast,crf=20"),
     ("h264_videotoolbox", "b=8000000"),
     ("h264_nvenc", "b=8000000"),
@@ -139,11 +139,11 @@ const H264: &[(&str, &str)] = &[
     ("libopenh264", "b=8000000"),
     ("mpeg4", "b=8000000"),
 ];
-const AAC: &[&str] = &["aac", "aac_at", "libfdk_aac"];
+pub const AAC: &[&str] = &["aac", "aac_at", "libfdk_aac"];
 
 /// A libavfilter graph as an mpv `vf` entry; %N% quoting keeps its commas,
 /// brackets and quotes intact.
-fn lavfi(graph: &str) -> String {
+pub fn lavfi(graph: &str) -> String {
     format!("lavfi=graph={}", crate::mpv::quote_opt(graph))
 }
 

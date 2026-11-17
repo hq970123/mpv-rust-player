@@ -7,8 +7,9 @@
 //!   control    — SOAP calls (SetAVTransportURI, Play, Pause, Seek, Stop,
 //!                SetVolume) and a 1 s GetPositionInfo poll.
 //!
-//! The TV decodes the file itself, so formats it cannot play will fail there;
-//! there is no transcoding in this version.
+//! The TV decodes the file itself unless the file is transcoded first
+//! (see `transcode`): then the server streams a growing MPEG-TS file, and
+//! seeking restarts the encoder at the new position.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -23,6 +24,9 @@ const SSDP_ADDR: &str = "239.255.255.250:1900";
 const AVT: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const RC: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
 const DLNA_FLAGS: &str = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+/// Live transcoded stream: no byte or time seeking, converted content.
+const LIVE_FLAGS: &str = "DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+const LIVE_MIME: &str = "video/mpeg";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Device {
@@ -212,6 +216,13 @@ pub struct Served {
     pub token: String,
     /// Produces the SRT text on request (so live subtitles are as fresh as possible).
     pub subtitle: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+    /// Set for a file that is still being written by the transcoder; the
+    /// flag turns true once it is complete.
+    pub live: Option<Arc<AtomicBool>>,
+    /// Highest byte offset handed out (throttles the transcoder).
+    pub sent: Arc<AtomicU64>,
+    /// Seconds the served stream starts into the source; subtitles shift by it.
+    pub sub_offset: f64,
 }
 
 pub struct MediaServer {
@@ -279,15 +290,15 @@ fn serve(mut conn: TcpStream, served: &Arc<Mutex<Served>>) -> std::io::Result<()
     }
     let head_only = method.eq_ignore_ascii_case("HEAD");
 
-    let (media, token, sub) = {
+    let (media, token, sub, live, sent, sub_offset) = {
         let s = served.lock().unwrap();
-        (s.media.clone(), s.token.clone(), s.subtitle.clone())
+        (s.media.clone(), s.token.clone(), s.subtitle.clone(), s.live.clone(), s.sent.clone(), s.sub_offset)
     };
     let host = headers.get("host").cloned().unwrap_or_default();
 
     if path.starts_with(&format!("/sub/{token}")) {
         let Some(f) = sub else { return not_found(&mut conn) };
-        let body = f().into_bytes();
+        let body = crate::transcode::shift_srt(&f(), sub_offset).into_bytes();
         let h = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/srt; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\ntransferMode.dlna.org: Interactive\r\nConnection: close\r\n\r\n",
             body.len()
@@ -302,6 +313,9 @@ fn serve(mut conn: TcpStream, served: &Arc<Mutex<Served>>) -> std::io::Result<()
         return not_found(&mut conn);
     }
     let Some(media) = media else { return not_found(&mut conn) };
+    if let Some(done) = live {
+        return serve_growing(conn, &media, &done, &sent, served, &token, head_only, sub.is_some(), &host);
+    }
     let mut file = std::fs::File::open(&media)?;
     let size = file.metadata()?.len();
     let (mut start, mut end) = (0u64, size.saturating_sub(1));
@@ -351,6 +365,68 @@ fn serve(mut conn: TcpStream, served: &Arc<Mutex<Served>>) -> std::io::Result<()
         }
         conn.write_all(&buf[..n])?;
         left -= n as u64;
+    }
+    Ok(())
+}
+
+/// Stream a file the transcoder is still writing: no length, no ranges,
+/// follow the tail until the encoder is done or a new cast replaces it.
+#[allow(clippy::too_many_arguments)]
+fn serve_growing(
+    mut conn: TcpStream,
+    media: &std::path::Path,
+    done: &AtomicBool,
+    sent: &AtomicU64,
+    served: &Arc<Mutex<Served>>,
+    token: &str,
+    head_only: bool,
+    has_sub: bool,
+    host: &str,
+) -> std::io::Result<()> {
+    let mut h = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {LIVE_MIME}\r\ntransferMode.dlna.org: Streaming\r\ncontentFeatures.dlna.org: {LIVE_FLAGS}\r\n"
+    );
+    if has_sub && !host.is_empty() {
+        h.push_str(&format!("CaptionInfo.sec: http://{host}/sub/{token}.srt\r\n"));
+    }
+    h.push_str("Connection: close\r\n\r\n");
+    conn.write_all(h.as_bytes())?;
+    if head_only {
+        return Ok(());
+    }
+    let t0 = Instant::now();
+    let mut file = loop {
+        match std::fs::File::open(media) {
+            Ok(f) => break f,
+            Err(e) if t0.elapsed() > Duration::from_secs(20) || done.load(Ordering::SeqCst) => return Err(e),
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    let mut pos = 0u64;
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut idle = Instant::now();
+    loop {
+        let n = file.read(&mut buf)?;
+        if n > 0 {
+            conn.write_all(&buf[..n])?;
+            pos += n as u64;
+            sent.fetch_max(pos, Ordering::Relaxed);
+            idle = Instant::now();
+            continue;
+        }
+        if done.load(Ordering::SeqCst) {
+            // One more read: the encoder may have flushed after our last one.
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            conn.write_all(&buf[..n])?;
+            continue;
+        }
+        if served.lock().unwrap().token != token || idle.elapsed() > Duration::from_secs(60) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     Ok(())
 }
@@ -412,7 +488,7 @@ fn parse_hms(s: &str) -> Option<f64> {
     Some(total)
 }
 
-fn didl(title: &str, media_url: &str, mime: &str, size: u64, sub_url: Option<&str>) -> String {
+fn didl(title: &str, media_url: &str, mime: &str, flags: &str, size: u64, sub_url: Option<&str>) -> String {
     let class = if mime.starts_with("audio") { "object.item.audioItem.musicTrack" } else { "object.item.videoItem" };
     let mut s = String::from(
         "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
@@ -420,10 +496,8 @@ xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:sec=\"http://www.se
     );
     s.push_str("<item id=\"0\" parentID=\"-1\" restricted=\"1\">");
     s.push_str(&format!("<dc:title>{}</dc:title><upnp:class>{class}</upnp:class>", escape(title)));
-    s.push_str(&format!(
-        "<res protocolInfo=\"http-get:*:{mime}:{DLNA_FLAGS}\" size=\"{size}\">{}</res>",
-        escape(media_url)
-    ));
+    let size = if size > 0 { format!(" size=\"{size}\"") } else { String::new() };
+    s.push_str(&format!("<res protocolInfo=\"http-get:*:{mime}:{flags}\"{size}>{}</res>", escape(media_url)));
     if let Some(u) = sub_url {
         s.push_str(&format!("<res protocolInfo=\"http-get:*:text/srt:*\">{}</res>", escape(u)));
         s.push_str(&format!("<sec:CaptionInfoEx sec:type=\"srt\">{}</sec:CaptionInfoEx>", escape(u)));
@@ -440,6 +514,8 @@ pub enum CastState {
     #[default]
     Idle,
     Connecting,
+    /// Waiting for the transcoder's first megabyte.
+    Transcoding,
     Playing,
     Paused,
     Buffering,
@@ -454,6 +530,8 @@ pub struct CastStatus {
     pos: AtomicU64,
     dur: AtomicU64,
     pub volume: AtomicU64,
+    /// The current cast goes through the transcoder.
+    pub transcoding: AtomicBool,
 }
 
 impl CastStatus {
@@ -471,8 +549,17 @@ impl CastStatus {
     }
 }
 
+#[derive(Clone)]
+struct StartArgs {
+    device: Device,
+    media: PathBuf,
+    title: String,
+    has_sub: bool,
+    transcode: Option<crate::transcode::Job>,
+}
+
 enum Cmd {
-    Start { device: Device, media: PathBuf, title: String, start: f64, has_sub: bool },
+    Start(StartArgs, f64),
     Play,
     Pause,
     Seek(f64),
@@ -489,6 +576,7 @@ pub struct Caster {
 
 impl Caster {
     pub fn new(ctx: eframe::egui::Context) -> Self {
+        crate::transcode::clean_temp();
         let (tx, rx) = channel();
         let status: Arc<CastStatus> = Arc::default();
         status.volume.store(30f64.to_bits(), Ordering::Relaxed);
@@ -502,22 +590,22 @@ impl Caster {
     }
 
     /// Start casting `media`. `subtitle` is called whenever the TV fetches the SRT.
+    /// With `transcode`, the file is converted on the fly (its `start` is ignored).
     pub fn start(
         &self,
         device: Device,
         media: PathBuf,
         start: f64,
         subtitle: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+        transcode: Option<crate::transcode::Job>,
     ) {
         let title = media.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let has_sub = subtitle.is_some();
         if let Some(s) = &self.server {
-            let mut sv = s.served.lock().unwrap();
-            sv.media = Some(media.clone());
-            sv.token = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-            sv.subtitle = subtitle;
+            s.served.lock().unwrap().subtitle = subtitle;
         }
-        let _ = self.tx.send(Cmd::Start { device, media, title, start, has_sub });
+        self.status.transcoding.store(transcode.is_some(), Ordering::Relaxed);
+        let _ = self.tx.send(Cmd::Start(StartArgs { device, media, title, has_sub, transcode }, start));
     }
     pub fn play(&self) {
         let _ = self.tx.send(Cmd::Play);
@@ -538,80 +626,116 @@ impl Caster {
     }
 }
 
+fn new_token() -> String {
+    format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos())
+}
+
+fn avt(d: &Device, action: &str, args: &str) -> Result<String, String> {
+    soap(&d.avt_url, AVT, action, args)
+}
+
+/// Point the server at the media (starting the transcoder if needed) and tell
+/// the device to play it from `start`.
+fn begin(
+    a: &StartArgs,
+    start: f64,
+    server: &MediaServer,
+    st: &CastStatus,
+    ctx: &eframe::egui::Context,
+) -> Result<Option<crate::transcode::Transcoder>, String> {
+    let ip = local_ip_towards(&a.device.avt_url).ok_or("no network route to device")?;
+    let token = new_token();
+    let host = match ip {
+        IpAddr::V4(v) => format!("{v}:{}", server.port),
+        IpAddr::V6(v) => format!("[{v}]:{}", server.port),
+    };
+    let mut tc = None;
+    let (url, mime, flags, size) = if let Some(job) = &a.transcode {
+        let mut job = job.clone();
+        job.start = start;
+        job.out = crate::transcode::temp_dir().join(format!("{token}.ts"));
+        let sent = Arc::new(AtomicU64::new(0));
+        let t = crate::transcode::Transcoder::start(job, sent.clone());
+        {
+            let mut sv = server.served.lock().unwrap();
+            sv.media = Some(t.out.clone());
+            sv.token = token.clone();
+            sv.live = Some(t.done.clone());
+            sv.sent = sent;
+            sv.sub_offset = start;
+        }
+        st.set_state(CastState::Transcoding);
+        ctx.request_repaint();
+        t.wait_ready(Duration::from_secs(45))?;
+        tc = Some(t);
+        (format!("http://{host}/media/{token}.ts"), LIVE_MIME, LIVE_FLAGS, 0)
+    } else {
+        {
+            let mut sv = server.served.lock().unwrap();
+            sv.media = Some(a.media.clone());
+            sv.token = token.clone();
+            sv.live = None;
+            sv.sub_offset = 0.0;
+        }
+        let ext = a.media.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_else(|| "mp4".into());
+        let size = std::fs::metadata(&a.media).map(|m| m.len()).unwrap_or(0);
+        (format!("http://{host}/media/{token}.{ext}"), mime_for(&a.media), DLNA_FLAGS, size)
+    };
+    let sub_url = a.has_sub.then(|| format!("http://{host}/sub/{token}.srt"));
+    let meta = didl(&a.title, &url, mime, flags, size, sub_url.as_deref());
+    let _ = avt(&a.device, "Stop", "<InstanceID>0</InstanceID>");
+    let args = format!(
+        "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData>{}</CurrentURIMetaData>",
+        escape(&url),
+        escape(&meta)
+    );
+    avt(&a.device, "SetAVTransportURI", &args)
+        .or_else(|_| {
+            // Some renderers reject rich metadata; retry without it.
+            let args = format!(
+                "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>",
+                escape(&url)
+            );
+            avt(&a.device, "SetAVTransportURI", &args)
+        })
+        .and_then(|_| avt(&a.device, "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>"))?;
+    st.set_state(CastState::Buffering);
+    Ok(tc)
+}
+
 fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServer>>, ctx: eframe::egui::Context) {
     let mut dev: Option<Device> = None;
+    let mut args: Option<StartArgs> = None;
+    let mut tc: Option<crate::transcode::Transcoder> = None;
+    // Source time at which the served stream starts (transcoding only).
+    let mut offset = 0.0f64;
     let mut pending_seek: Option<(f64, Instant)> = None;
     let mut last_poll = Instant::now();
     let mut seek_guard = Instant::now();
+    let mut queued: std::collections::VecDeque<Cmd> = Default::default();
     loop {
-        let cmd = match rx.recv_timeout(Duration::from_millis(250)) {
+        let next = match queued.pop_front() {
+            Some(c) => Ok(c),
+            None => rx.recv_timeout(Duration::from_millis(250)),
+        };
+        let cmd = match next {
             Ok(c) => Some(c),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => return,
         };
-        let avt = |d: &Device, action: &str, args: &str| soap(&d.avt_url, AVT, action, args);
+        // Start, or restart a transcoded stream at a new position.
+        let mut launch: Option<(StartArgs, f64)> = None;
         match cmd {
-            Some(Cmd::Start { device, media, title, start, has_sub }) => {
+            Some(Cmd::Start(a, start)) => {
                 if let Some(old) = dev.take() {
-                    if old.avt_url != device.avt_url {
+                    if old.avt_url != a.device.avt_url {
                         let _ = avt(&old, "Stop", "<InstanceID>0</InstanceID>");
                     }
                 }
                 st.set_state(CastState::Connecting);
-                *st.device.lock().unwrap() = Some(device.clone());
-                st.pos.store(start.to_bits(), Ordering::Relaxed);
-                ctx.request_repaint();
-                let Some(server) = &server else {
-                    st.set_state(CastState::Error("media server unavailable".into()));
-                    continue;
-                };
-                let Some(ip) = local_ip_towards(&device.avt_url) else {
-                    st.set_state(CastState::Error("no network route to device".into()));
-                    continue;
-                };
-                let token = server.served.lock().unwrap().token.clone();
-                let ext = media.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_else(|| "mp4".into());
-                let host = match ip {
-                    IpAddr::V4(v) => format!("{v}:{}", server.port),
-                    IpAddr::V6(v) => format!("[{v}]:{}", server.port),
-                };
-                let url = format!("http://{host}/media/{token}.{ext}");
-                let sub_url = has_sub.then(|| format!("http://{host}/sub/{token}.srt"));
-                let size = std::fs::metadata(&media).map(|m| m.len()).unwrap_or(0);
-                let meta = didl(&title, &url, mime_for(&media), size, sub_url.as_deref());
-                let _ = avt(&device, "Stop", "<InstanceID>0</InstanceID>");
-                let args = format!(
-                    "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData>{}</CurrentURIMetaData>",
-                    escape(&url),
-                    escape(&meta)
-                );
-                let res = avt(&device, "SetAVTransportURI", &args)
-                    .or_else(|_| {
-                        // Some renderers reject rich metadata; retry without it.
-                        let args = format!(
-                            "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>",
-                            escape(&url)
-                        );
-                        avt(&device, "SetAVTransportURI", &args)
-                    })
-                    .and_then(|_| avt(&device, "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>"));
-                match res {
-                    Ok(_) => {
-                        st.set_state(CastState::Buffering);
-                        if start > 2.0 {
-                            pending_seek = Some((start, Instant::now()));
-                        }
-                        if let Some(rc) = &device.rc_url {
-                            if let Ok(x) = soap(rc, RC, "GetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel>") {
-                                if let Some(v) = tag(&x, "CurrentVolume").and_then(|v| v.parse::<f64>().ok()) {
-                                    st.volume.store(v.to_bits(), Ordering::Relaxed);
-                                }
-                            }
-                        }
-                        dev = Some(device);
-                    }
-                    Err(e) => st.set_state(CastState::Error(e)),
-                }
+                *st.device.lock().unwrap() = Some(a.device.clone());
+                st.dur.store(0f64.to_bits(), Ordering::Relaxed);
+                launch = Some((a, start));
             }
             Some(Cmd::Play) => {
                 if let Some(d) = &dev {
@@ -627,8 +751,20 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
                     }
                 }
             }
-            Some(Cmd::Seek(t)) => {
-                if let Some(d) = &dev {
+            Some(Cmd::Seek(mut t)) => {
+                if tc.is_some() {
+                    // Restarting the encoder is costly: only the last of a burst of seeks counts.
+                    std::thread::sleep(Duration::from_millis(150));
+                    while let Ok(c) = rx.try_recv() {
+                        match c {
+                            Cmd::Seek(x) => t = x,
+                            other => queued.push_back(other),
+                        }
+                    }
+                    if let Some(a) = args.clone() {
+                        launch = Some((a, t));
+                    }
+                } else if let Some(d) = &dev {
                     let _ = avt(d, "Seek", &format!("<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>{}</Target>", hms(t)));
                     seek_guard = Instant::now();
                 }
@@ -647,16 +783,56 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
                 if let Some(d) = dev.take() {
                     let _ = avt(&d, "Stop", "<InstanceID>0</InstanceID>");
                 }
+                tc = None;
+                args = None;
                 pending_seek = None;
                 st.set_state(CastState::Stopped);
                 if let Some(s) = &server {
                     let mut sv = s.served.lock().unwrap();
                     sv.media = None;
                     sv.subtitle = None;
+                    sv.live = None;
+                    sv.token = new_token();
                 }
                 ctx.request_repaint();
             }
             None => {}
+        }
+
+        if let Some((a, start)) = launch {
+            tc = None; // stops the previous encoder
+            pending_seek = None;
+            st.pos.store(start.to_bits(), Ordering::Relaxed);
+            ctx.request_repaint();
+            let Some(server) = &server else {
+                st.set_state(CastState::Error("media server unavailable".into()));
+                continue;
+            };
+            match begin(&a, start, server, &st, &ctx) {
+                Ok(t) => {
+                    offset = if t.is_some() { start } else { 0.0 };
+                    if t.is_none() && start > 2.0 {
+                        pending_seek = Some((start, Instant::now()));
+                    }
+                    tc = t;
+                    if let Some(rc) = &a.device.rc_url {
+                        if let Ok(x) = soap(rc, RC, "GetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel>") {
+                            if let Some(v) = tag(&x, "CurrentVolume").and_then(|v| v.parse::<f64>().ok()) {
+                                st.volume.store(v.to_bits(), Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    dev = Some(a.device.clone());
+                    args = Some(a);
+                    seek_guard = Instant::now();
+                }
+                Err(e) => {
+                    dev = None;
+                    args = None;
+                    st.set_state(CastState::Error(e));
+                }
+            }
+            ctx.request_repaint();
         }
 
         // poll position / transport state once a second
@@ -665,6 +841,14 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
             continue;
         }
         last_poll = Instant::now();
+        if let Some(e) = tc.as_ref().and_then(|t| t.error.lock().unwrap().clone()) {
+            let _ = avt(&d, "Stop", "<InstanceID>0</InstanceID>");
+            dev = None;
+            tc = None;
+            st.set_state(CastState::Error(e));
+            ctx.request_repaint();
+            continue;
+        }
         if let Ok(x) = avt(&d, "GetTransportInfo", "<InstanceID>0</InstanceID>") {
             let s = tag(&x, "CurrentTransportState").unwrap_or_default();
             let new = match s.as_str() {
@@ -680,6 +864,7 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
             if let Some(n) = new {
                 if n == CastState::Stopped {
                     dev = None;
+                    tc = None;
                 }
                 st.set_state(n);
             }
@@ -687,10 +872,13 @@ fn session(rx: Receiver<Cmd>, st: Arc<CastStatus>, server: Option<Arc<MediaServe
         if seek_guard.elapsed() > Duration::from_millis(1500) {
             if let Ok(x) = avt(&d, "GetPositionInfo", "<InstanceID>0</InstanceID>") {
                 if let Some(p) = tag(&x, "RelTime").and_then(|s| parse_hms(&s)) {
-                    st.pos.store(p.to_bits(), Ordering::Relaxed);
+                    st.pos.store((offset + p).to_bits(), Ordering::Relaxed);
                 }
-                if let Some(t) = tag(&x, "TrackDuration").and_then(|s| parse_hms(&s)).filter(|t| *t > 0.0) {
-                    st.dur.store(t.to_bits(), Ordering::Relaxed);
+                // A growing stream has no meaningful duration; the app keeps the local one.
+                if tc.is_none() {
+                    if let Some(t) = tag(&x, "TrackDuration").and_then(|s| parse_hms(&s)).filter(|t| *t > 0.0) {
+                        st.dur.store(t.to_bits(), Ordering::Relaxed);
+                    }
                 }
             }
         }

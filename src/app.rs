@@ -526,17 +526,76 @@ impl PlayerApp {
         self.cast_device.is_some()
     }
 
-    fn start_cast(&mut self, device: Device) {
+    fn start_cast(&mut self, device: Device, force_transcode: bool) {
         let Some(path) = self.current.clone() else {
             self.toast(self.t("请先打开一个视频", "Open a video first"));
             return;
         };
-        let sub = if self.s.cast_subs { self.cast_subtitle() } else { None };
-        let pos = self.st.time;
+        let pos = if self.casting() { self.caster.status.pos() } else { self.st.time };
+        let why = if force_transcode { Some("manual".to_string()) } else { self.cast_transcode_reason(&path) };
+        let mut job = None;
+        if let Some(why) = &why {
+            let encoders = self.mpv.as_ref().and_then(|m| m.get("encoder-list")).map(|j| crate::clip::parse_encoders(&j));
+            let encoders = encoders.unwrap_or_default();
+            if crate::transcode::can_encode(&encoders) {
+                job = Some(self.cast_transcode_job(&path, encoders));
+                self.toast(format!("{} ({why})", self.t("电视可能不支持此格式，正在转码投屏", "Transcoding for the TV")));
+            } else {
+                self.toast(self.t("这个 libmpv 不带 H.264 编码器，改为直接投屏", "No H.264 encoder in libmpv; casting the file as is"));
+            }
+        }
+        // Burned-in tracks need no sidecar; live subtitles still go as SRT.
+        let burned = job.as_ref().map(|j| !matches!(j.subs, crate::clip::Subs::None)).unwrap_or(false);
+        let sub = if self.s.cast_subs && !burned { self.cast_subtitle() } else { None };
         self.set("pause", "yes");
-        self.caster.start(device.clone(), path, pos, sub);
-        self.toast(format!("{} {}", self.t("正在连接", "Connecting to"), device.name));
+        self.caster.start(device.clone(), path, pos, sub, job);
+        if why.is_none() {
+            self.toast(format!("{} {}", self.t("正在连接", "Connecting to"), device.name));
+        }
         self.cast_device = Some(device);
+    }
+
+    /// Why the open file should be transcoded for the TV, per the setting.
+    fn cast_transcode_reason(&self, path: &std::path::Path) -> Option<String> {
+        use crate::transcode::Mode;
+        match self.s.cast_transcode {
+            Mode::Never => None,
+            Mode::Always => Some("always".into()),
+            Mode::Auto => {
+                let codec = |kind: &str| {
+                    self.tracks.iter().find(|t| t.kind == kind && t.selected).map(|t| t.codec.clone()).filter(|c| !c.is_empty())
+                };
+                let probe = crate::transcode::Probe {
+                    ext: path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default(),
+                    vcodec: codec("video").filter(|c| !matches!(c.as_str(), "mjpeg" | "png")),
+                    acodec: codec("audio"),
+                    pixfmt: self.mp_s("video-params/pixelformat"),
+                };
+                crate::transcode::reason(&probe)
+            }
+        }
+    }
+
+    fn cast_transcode_job(&self, path: &std::path::Path, encoders: Vec<String>) -> crate::transcode::Job {
+        use crate::clip::Subs;
+        let live = self.s.live_enabled && self.live_available();
+        let subs = if !self.s.cast_subs || live || self.mp_s("sub-visibility") == "no" {
+            Subs::None
+        } else {
+            match self.tracks.iter().find(|t| t.kind == "sub" && t.selected) {
+                Some(t) if t.external && !t.external_file.is_empty() => Subs::File(t.external_file.clone().into()),
+                Some(t) => Subs::Track(t.id),
+                None => Subs::None,
+            }
+        };
+        crate::transcode::Job {
+            src: path.to_string_lossy().to_string(),
+            start: 0.0,
+            aid: self.tracks.iter().find(|t| t.kind == "audio" && t.selected).map(|t| t.id),
+            subs,
+            encoders,
+            out: Default::default(),
+        }
     }
 
     fn stop_cast(&mut self, resume: bool) {
@@ -810,7 +869,7 @@ impl eframe::App for PlayerApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
-        let mut inbox: Vec<Option<PathBuf>> = self.inbox.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
+        let inbox: Vec<Option<PathBuf>> = self.inbox.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
         #[cfg(target_os = "macos")]
         {
             let finder = crate::macos_open::take();
@@ -1469,6 +1528,7 @@ impl PlayerApp {
         if let Some(dev) = self.cast_device.clone() {
             let state = match self.caster.status.state() {
                 CastState::Connecting => self.t("连接中…", "Connecting…"),
+                CastState::Transcoding => self.t("正在转码…", "Transcoding…"),
                 CastState::Buffering => self.t("缓冲中…", "Buffering…"),
                 CastState::Playing => self.t("播放中", "Playing"),
                 CastState::Paused => self.t("已暂停", "Paused"),
@@ -1476,7 +1536,22 @@ impl PlayerApp {
             };
             ui.label(RichText::new(format!("{}  {}", ic::TV, dev.name)).strong());
             ui.label(RichText::new(state).size(12.5).color(MUTED));
+            if self.caster.status.transcoding.load(Ordering::Relaxed) {
+                ui.label(
+                    RichText::new(self.t("转码投屏中：拖动进度会重新转码", "Transcoded: seeking restarts the stream"))
+                        .size(12.0)
+                        .color(MUTED),
+                );
+            }
             ui.separator();
+            if !self.caster.status.transcoding.load(Ordering::Relaxed)
+                && ui
+                    .button(menu_label(ic::REFRESH, self.t("画面或声音不对？改为转码投屏", "No picture or sound? Transcode")))
+                    .clicked()
+            {
+                ui.close_menu();
+                self.start_cast(dev.clone(), true);
+            }
             if ui.button(menu_label(ic::STOP, self.t("停止投屏，在本机继续", "Stop casting, resume here"))).clicked()
             {
                 ui.close_menu();
@@ -1512,7 +1587,7 @@ impl PlayerApp {
             };
             if ui.button(label).clicked() {
                 ui.close_menu();
-                self.start_cast(d);
+                self.start_cast(d, false);
             }
         }
         ui.separator();
@@ -1525,9 +1600,10 @@ impl PlayerApp {
             self.s.save();
         }
         ui.label(
-            RichText::new(
-                self.t("电视自己解码，不支持的格式需先转码", "The TV decodes the file; unsupported formats won't play"),
-            )
+            RichText::new(self.t(
+                "电视不支持的格式会自动转码为 H.264（设置中可改）",
+                "Formats the TV can't play are transcoded to H.264 (see Settings)",
+            ))
             .size(12.0)
             .color(MUTED),
         );
@@ -1550,6 +1626,7 @@ impl PlayerApp {
         );
         let state = match self.caster.status.state() {
             CastState::Connecting => self.t("连接中…", "Connecting…"),
+            CastState::Transcoding => self.t("正在转码，马上开始…", "Transcoding, starting shortly…"),
             CastState::Buffering => self.t("电视正在缓冲…", "TV is buffering…"),
             CastState::Paused => self.t("已暂停", "Paused"),
             _ => self.t("用下方控制栏操控电视", "Use the controls below to drive the TV"),
@@ -1966,6 +2043,30 @@ impl PlayerApp {
             .changed()
             {
                 self.s.save();
+            }
+            ui.end_row();
+
+            ui.label(self.t("投屏转码", "Cast transcoding"));
+            {
+                use crate::transcode::Mode;
+                let name = |m: Mode, zh: bool| match (m, zh) {
+                    (Mode::Auto, true) => "自动（电视不支持的格式）",
+                    (Mode::Auto, false) => "Auto (formats the TV can't play)",
+                    (Mode::Always, true) => "总是转码",
+                    (Mode::Always, false) => "Always",
+                    (Mode::Never, true) => "从不（直接发送原文件）",
+                    (Mode::Never, false) => "Never (send the file as is)",
+                };
+                let zh = self.s.ui_lang == UiLang::Zh;
+                let before = self.s.cast_transcode;
+                egui::ComboBox::from_id_salt("cast_transcode").selected_text(name(before, zh)).show_ui(ui, |ui| {
+                    for m in [Mode::Auto, Mode::Always, Mode::Never] {
+                        ui.selectable_value(&mut self.s.cast_transcode, m, name(m, zh));
+                    }
+                });
+                if self.s.cast_transcode != before {
+                    self.s.save();
+                }
             }
             ui.end_row();
 

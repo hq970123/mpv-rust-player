@@ -14,6 +14,7 @@ mod settings;
 mod shots;
 mod single;
 mod thumbs;
+mod transcode;
 
 use eframe::egui;
 
