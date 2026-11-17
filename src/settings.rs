@@ -80,6 +80,19 @@ pub struct Settings {
     pub seek_thumbs: bool,
     /// Folder for exported clips / GIFs; empty = Videos/OK Player.
     pub clip_dir: String,
+    /// Upper volume limit in percent (100, 150 or 200).
+    pub volume_max: u32,
+    /// Subtitle style; empty font = mpv default.
+    pub sub_font: String,
+    pub sub_color: [u8; 4],
+    pub sub_outline_color: [u8; 4],
+    pub sub_outline: f32,
+    pub sub_shadow: f32,
+    pub sub_bold: bool,
+    pub sub_box: bool,
+    pub sub_box_color: [u8; 4],
+    /// Apply the style to ASS subtitles too.
+    pub sub_force_style: bool,
 }
 
 impl Default for Settings {
@@ -114,6 +127,16 @@ impl Default for Settings {
             single_instance: true,
             seek_thumbs: true,
             clip_dir: String::new(),
+            volume_max: 150,
+            sub_font: String::new(),
+            sub_color: [255, 255, 255, 255],
+            sub_outline_color: [0, 0, 0, 255],
+            sub_outline: 3.0,
+            sub_shadow: 0.0,
+            sub_bold: false,
+            sub_box: false,
+            sub_box_color: [0, 0, 0, 160],
+            sub_force_style: false,
         }
     }
 }

@@ -1,5 +1,6 @@
 mod export;
 mod extra;
+mod more;
 
 use crate::cast::{CastState, Caster, Device};
 use crate::icons as ic;
@@ -151,6 +152,7 @@ pub struct PlayerApp {
     cast_device: Option<Device>,
     shot_msg: Arc<Mutex<Option<String>>>,
     x: extra::Extra,
+    m: more::More,
     thumbs: crate::thumbs::Thumbs,
     inbox: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     ex: export::ExportUi,
@@ -191,6 +193,7 @@ impl PlayerApp {
             cast_device: None,
             shot_msg: Arc::new(Mutex::new(None)),
             x: extra::Extra::default(),
+            m: more::More::default(),
             thumbs: crate::thumbs::Thumbs::new(cc.egui_ctx.clone()),
             inbox: None,
             ex: export::ExportUi::default(),
@@ -214,7 +217,7 @@ impl PlayerApp {
             ("input-vo-keyboard", "no"),
             ("hwdec", &app.s.hwdec),
             ("volume", &volume),
-            ("volume-max", "150"),
+            ("volume-max", "200"),
             ("sub-auto", "fuzzy"),
             ("audio-file-auto", "fuzzy"),
             ("screenshot-directory", &shots),
@@ -349,6 +352,7 @@ impl PlayerApp {
                 Event::FileLoaded => {
                     self.refresh_tracks();
                     self.on_loaded_extra();
+                    self.on_loaded_more();
                     let dur = m.get_f64("duration").unwrap_or(0.0);
                     self.thumbs.set_file(self.current.as_deref(), dur);
                     self.schedule_live(true, 0);
@@ -398,6 +402,7 @@ impl PlayerApp {
             self.on_eof();
         }
         self.tick_extra();
+        self.tick_more();
         if let Some((at, new_media)) = self.live_restart_at {
             if Instant::now() >= at {
                 self.live_restart_at = None;
@@ -510,7 +515,7 @@ impl PlayerApp {
     }
 
     fn set_volume(&mut self, v: f64) {
-        let v = v.clamp(0.0, if self.casting() { 100.0 } else { 150.0 });
+        let v = v.clamp(0.0, if self.casting() { 100.0 } else { self.s.volume_max.clamp(100, 200) as f64 });
         if self.casting() {
             self.caster.set_volume(v);
         } else {
@@ -915,6 +920,7 @@ impl eframe::App for PlayerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         self.keyboard_extra(ctx);
+        self.keyboard_more(ctx);
         self.keyboard(ctx);
 
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
@@ -946,6 +952,7 @@ impl eframe::App for PlayerApp {
             self.prefs_window(ctx);
         }
         self.extra_windows(ctx);
+        self.more_windows(ctx);
         self.export_frame(ctx);
 
         #[cfg(not(target_os = "macos"))]
@@ -1357,15 +1364,30 @@ impl PlayerApp {
         let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
         let p = ui.painter();
         p.rect_filled(track, CornerRadius::same(2), Color32::from_white_alpha(60));
-        let frac = (self.st.volume / 100.0).clamp(0.0, 1.0) as f32;
+        let span = if self.casting() { 100.0 } else { self.s.volume_max.clamp(100, 200) as f64 };
+        let frac = (self.st.volume / span).clamp(0.0, 1.0) as f32;
         let x = track.left() + track.width() * frac;
         let mut f = track;
         f.set_right(x);
-        p.rect_filled(f, CornerRadius::same(2), ACCENT);
+        p.rect_filled(
+            f,
+            CornerRadius::same(2),
+            if self.st.volume > 100.5 { Color32::from_rgb(255, 170, 70) } else { ACCENT },
+        );
+        if span > 100.0 {
+            let x100 = track.left() + track.width() * (100.0 / span) as f32;
+            p.rect_filled(
+                Rect::from_center_size(pos2(x100, track.center().y), vec2(2.0, 10.0)),
+                CornerRadius::ZERO,
+                Color32::from_white_alpha(140),
+            );
+        }
         p.circle_filled(pos2(x, track.center().y), 6.0, Color32::WHITE);
         if resp.dragged() || resp.clicked() {
             if let Some(pos) = resp.interact_pointer_pos() {
-                let v = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0) * 100.0;
+                let v = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0) as f64 * span;
+                // Snap to 100 % near the mark.
+                let v = if (v - 100.0).abs() < span * 0.03 { 100.0 } else { v };
                 self.set_volume(v as f64);
             }
         }

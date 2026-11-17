@@ -15,7 +15,7 @@ const HISTORY_MAX_RECENT: usize = 20;
 #[serde(default)]
 pub(super) struct History {
     /// file path -> last position in seconds
-    positions: HashMap<String, f64>,
+    pub(super) positions: HashMap<String, f64>,
     /// most recent first
     pub(super) recent: Vec<String>,
 }
@@ -128,6 +128,7 @@ impl PlayerApp {
     pub(super) fn init_extra(&mut self) {
         self.apply_audio_filters();
         self.apply_loop_mode();
+        self.apply_sub_style();
     }
 
     // ------------------------------------------------------------ open
@@ -483,6 +484,7 @@ impl PlayerApp {
             );
             p.rect_filled(r, CornerRadius::same(2), Color32::from_rgb(255, 196, 80).linear_multiply(0.6));
         }
+        self.bookmark_marks(p, track, dur);
         for (t, _) in &self.x.chapters {
             if *t <= 0.5 {
                 continue;
@@ -623,6 +625,18 @@ impl PlayerApp {
             self.s.save();
             self.apply_audio_filters();
         }
+        ui.horizontal(|ui| {
+            ui.label(self.t("音量上限", "Max volume"));
+            for v in [100u32, 150, 200] {
+                if ui.selectable_label(self.s.volume_max == v, format!("{v}%")).clicked() {
+                    self.s.volume_max = v;
+                    self.s.save();
+                    if self.st.volume > v as f64 {
+                        self.set_volume(v as f64);
+                    }
+                }
+            }
+        });
         let mut stereo = self.mp_s("audio-channels") == "stereo";
         let label = self.t("强制立体声输出", "Force stereo output");
         if ui.checkbox(&mut stereo, label).changed() {
@@ -703,6 +717,10 @@ impl PlayerApp {
         let label = self.t("字幕位置（越大越靠下）", "Position (higher = lower)");
         if ui.add(egui::Slider::new(&mut pos, 0.0..=110.0).step_by(1.0).text(label)).changed() {
             self.set("sub-pos", &format!("{pos:.0}"));
+        }
+        if ui.button(menu_label(ic::CAPTIONS, self.t("字幕样式…", "Subtitle style…"))).clicked() {
+            ui.close_menu();
+            self.m.show_style = true;
         }
         let mut vis = self.mp_s("sub-visibility") != "no";
         let label = self.t("显示字幕 (V)", "Show subtitles (V)");
@@ -835,6 +853,7 @@ impl PlayerApp {
         if !self.x.chapters.is_empty() {
             ui.menu_button(menu_label(ic::BOOKMARK, self.t("章节", "Chapters")), |ui| self.chapter_items(ui));
         }
+        self.more_menu(ui);
         ui.menu_button(menu_label(self.loop_icon(), self.t("播放模式", "Play mode")), |ui| {
             self.play_mode_items(ui)
         });
@@ -1255,6 +1274,8 @@ impl PlayerApp {
                 ("Ctrl + U", self.t("打开网络地址", "Open URL")),
                 ("Tab", self.t("媒体信息", "Media info")),
                 ("Ctrl + I", self.t("播放统计", "Playback stats")),
+                ("B", self.t("添加书签", "Add bookmark")),
+                ("Shift+B / Ctrl+B", self.t("上一个 / 下一个书签", "Previous / next bookmark")),
                 ("F1", self.t("快捷键", "Shortcuts")),
                 ("Esc", self.t("退出全屏 / 画中画", "Leave full screen / PiP")),
             ];
