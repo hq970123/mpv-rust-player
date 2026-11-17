@@ -61,5 +61,10 @@ find "$APP/Contents/Frameworks" -name '*.dylib' -exec codesign --force -s - {} \
 codesign --force --deep -s - "$APP"
 
 cp README.md THIRD_PARTY.md dist/
-hdiutil create -volname "OK Player" -srcfolder "$APP" -ov -format UDZO "dist/OKPlayer-macos-${ARCH}.dmg"
+# hdiutil sometimes fails with "Resource busy" on CI runners; retry a few times.
+for i in 1 2 3 4 5; do
+  hdiutil create -volname "OK Player" -srcfolder "$APP" -ov -format UDZO "dist/OKPlayer-macos-${ARCH}.dmg" && break
+  [ "$i" = 5 ] && exit 1
+  echo "hdiutil failed, retrying ($i)"; sleep $((i * 5))
+done
 ls -la dist
