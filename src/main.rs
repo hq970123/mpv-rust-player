@@ -5,6 +5,7 @@ mod cast;
 mod chromecast;
 mod clip;
 mod icons;
+mod keymap;
 mod live;
 #[cfg(target_os = "macos")]
 mod macos_open;

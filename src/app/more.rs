@@ -217,7 +217,7 @@ impl PlayerApp {
         if ui
             .add(
                 egui::Button::new(menu_label(ic::BOOKMARK, self.t("在当前位置添加书签", "Add bookmark here")))
-                    .shortcut_text("B"),
+                    .shortcut_text(self.sc(crate::keymap::Action::BookmarkAdd)),
             )
             .clicked()
         {
@@ -251,9 +251,11 @@ impl PlayerApp {
             self.remove_bookmark(t);
         }
         ui.label(
-            RichText::new(self.t("Shift+B / Ctrl+B 跳到上一个 / 下一个", "Shift+B / Ctrl+B previous / next"))
-                .size(11.5)
-                .color(MUTED),
+            RichText::new(
+                self.t("可在快捷键里设置上一个 / 下一个书签", "Previous / next bookmark keys are in Shortcuts"),
+            )
+            .size(11.5)
+            .color(MUTED),
         );
     }
 
@@ -340,22 +342,6 @@ impl PlayerApp {
             self.t("跳过片头片尾", "Skip intro / outro").to_string()
         };
         ui.menu_button(menu_label(ic::SKIP_FORWARD, &label), |ui| self.skip_items(ui));
-    }
-
-    pub(super) fn keyboard_more(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() {
-            return;
-        }
-        let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
-        if k(Modifiers::SHIFT, Key::B) {
-            self.jump_bookmark(-1);
-        }
-        if k(Modifiers::COMMAND, Key::B) {
-            self.jump_bookmark(1);
-        }
-        if k(Modifiers::NONE, Key::B) {
-            self.add_bookmark();
-        }
     }
 
     // ------------------------------------------------------------ subtitle style

@@ -1,5 +1,6 @@
 mod export;
 mod extra;
+mod keys;
 mod more;
 
 use crate::cast::{CastState, Caster, Device};
@@ -153,6 +154,7 @@ pub struct PlayerApp {
     shot_msg: Arc<Mutex<Option<String>>>,
     x: extra::Extra,
     m: more::More,
+    kb: keys::Keys,
     thumbs: crate::thumbs::Thumbs,
     inbox: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     ex: export::ExportUi,
@@ -167,6 +169,7 @@ impl PlayerApp {
             renderer: None,
             init_error: None,
             st: PlayState { idle: true, speed: 1.0, volume: s.volume, ..Default::default() },
+            kb: keys::Keys::new(&s),
             s,
             tracks: Vec::new(),
             tracks_polled: Instant::now(),
@@ -795,92 +798,6 @@ impl PlayerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(480.0, 270.0)));
         }
     }
-
-    fn keyboard(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() {
-            return;
-        }
-        let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
-        let none = Modifiers::NONE;
-        let ctrl = Modifiers::COMMAND;
-        let space = k(none, Key::Space);
-        let left = k(none, Key::ArrowLeft);
-        let right = k(none, Key::ArrowRight);
-        let up = k(none, Key::ArrowUp);
-        let down = k(none, Key::ArrowDown);
-        let f = k(none, Key::F) || k(none, Key::Enter);
-        let esc = k(none, Key::Escape);
-        let m = k(none, Key::M);
-        let shift_s = k(Modifiers::SHIFT, Key::S);
-        let s = k(none, Key::S);
-        let copy = k(ctrl, Key::C);
-        let stats = k(ctrl, Key::I);
-        let open = k(ctrl, Key::O);
-        let slower = k(none, Key::OpenBracket);
-        let faster = k(none, Key::CloseBracket);
-        let prev = k(none, Key::PageUp);
-        let next = k(none, Key::PageDown);
-        let c = k(none, Key::C);
-        if space {
-            self.toggle_pause();
-        }
-        if left {
-            self.seek_rel(-5.0);
-        }
-        if right {
-            self.seek_rel(5.0);
-        }
-        if up {
-            self.set_volume(self.st.volume + 5.0);
-        }
-        if down {
-            self.set_volume(self.st.volume - 5.0);
-        }
-        if f {
-            self.toggle_fullscreen(ctx);
-        }
-        if esc {
-            if self.pip_restore.is_some() {
-                self.toggle_pip(ctx);
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-            }
-        }
-        if m {
-            self.cmd(&["cycle", "mute"]);
-        }
-        if s {
-            self.snapshot(self.s.shot_with_subs, false);
-        }
-        if shift_s {
-            self.snapshot(!self.s.shot_with_subs, false);
-        }
-        if copy {
-            self.snapshot(self.s.shot_with_subs, true);
-        }
-        if stats {
-            self.show_stats = !self.show_stats;
-        }
-        if open {
-            self.open_dialog();
-        }
-        if slower {
-            self.cmd(&["multiply", "speed", "0.9091"]);
-        }
-        if faster {
-            self.cmd(&["multiply", "speed", "1.1"]);
-        }
-        if prev {
-            self.step(-1);
-        }
-        if next {
-            self.step(1);
-        }
-        if c && self.live_available() {
-            let on = !self.s.live_enabled;
-            self.set_live(on);
-        }
-    }
 }
 
 impl eframe::App for PlayerApp {
@@ -919,9 +836,7 @@ impl eframe::App for PlayerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
-        self.keyboard_extra(ctx);
-        self.keyboard_more(ctx);
-        self.keyboard(ctx);
+        self.keyboard_all(ctx);
 
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() {
@@ -953,6 +868,7 @@ impl eframe::App for PlayerApp {
         }
         self.extra_windows(ctx);
         self.more_windows(ctx);
+        self.keys_window(ctx);
         self.export_frame(ctx);
 
         #[cfg(not(target_os = "macos"))]
@@ -1468,11 +1384,11 @@ impl PlayerApp {
         self.extra_menu(ui, ctx);
         ui.separator();
         ui.menu_button(menu_label(ic::CAMERA, self.t("截图", "Snapshot")), |ui| self.snapshot_items(ui, ctx));
-        let sc = |m: Modifiers| ctx.format_shortcut(&egui::KeyboardShortcut::new(m, Key::E));
+        let (sc_clip, sc_gif) = (self.sc(crate::keymap::Action::ExportClip), self.sc(crate::keymap::Action::ExportGif));
         if ui
             .add(
                 egui::Button::new(menu_label(ic::FILM, self.t("导出片段…", "Export clip…")))
-                    .shortcut_text(sc(Modifiers::COMMAND)),
+                    .shortcut_text(sc_clip.clone()),
             )
             .clicked()
         {
@@ -1482,7 +1398,7 @@ impl PlayerApp {
         if ui
             .add(
                 egui::Button::new(menu_label(ic::FILM, self.t("导出 GIF…", "Export GIF…")))
-                    .shortcut_text(sc(Modifiers::COMMAND | Modifiers::SHIFT)),
+                    .shortcut_text(sc_gif.clone()),
             )
             .clicked()
         {
@@ -1496,7 +1412,7 @@ impl PlayerApp {
             }
             self.toast(self.t("点击控制栏的投屏按钮选择设备", "Pick a device from the cast button in the control bar"));
         }
-        let stats_sc = ctx.format_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND, Key::I));
+        let stats_sc = self.sc(crate::keymap::Action::Stats);
         if ui
             .add(egui::Button::new(menu_label(ic::CHART, self.t("播放统计", "Playback Stats"))).shortcut_text(stats_sc))
             .clicked()
@@ -1513,22 +1429,34 @@ impl PlayerApp {
         }
     }
 
-    fn snapshot_items(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn snapshot_items(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         ui.set_min_width(240.0);
         let (s_main, s_alt) = if self.s.shot_with_subs {
             (self.t("截图（含字幕）", "Snapshot (with subtitles)"), self.t("截图（纯画面）", "Snapshot (video only)"))
         } else {
             (self.t("截图（纯画面）", "Snapshot (video only)"), self.t("截图（含字幕）", "Snapshot (with subtitles)"))
         };
-        if ui.add(egui::Button::new(menu_label(ic::CAMERA, s_main)).shortcut_text("S")).clicked() {
+        if ui
+            .add(
+                egui::Button::new(menu_label(ic::CAMERA, s_main))
+                    .shortcut_text(self.sc(crate::keymap::Action::Snapshot)),
+            )
+            .clicked()
+        {
             ui.close_menu();
             self.snapshot(self.s.shot_with_subs, false);
         }
-        if ui.add(egui::Button::new(menu_label(ic::CAPTIONS, s_alt)).shortcut_text("Shift+S")).clicked() {
+        if ui
+            .add(
+                egui::Button::new(menu_label(ic::CAPTIONS, s_alt))
+                    .shortcut_text(self.sc(crate::keymap::Action::SnapshotAlt)),
+            )
+            .clicked()
+        {
             ui.close_menu();
             self.snapshot(!self.s.shot_with_subs, false);
         }
-        let copy_sc = ctx.format_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND, Key::C));
+        let copy_sc = self.sc(crate::keymap::Action::CopyFrame);
         if ui
             .add(egui::Button::new(menu_label(ic::COPY, self.t("复制当前画面", "Copy frame"))).shortcut_text(copy_sc))
             .clicked()

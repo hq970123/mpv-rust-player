@@ -770,7 +770,10 @@ impl PlayerApp {
 
     fn window_items(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let label = menu_label(ic::PIN, self.t("窗口置顶", "Always on top"));
-        if ui.add(egui::Button::new(label).selected(self.x.on_top).shortcut_text("T")).clicked() {
+        if ui
+            .add(egui::Button::new(label).selected(self.x.on_top).shortcut_text(self.sc(crate::keymap::Action::OnTop)))
+            .clicked()
+        {
             ui.close_menu();
             self.toggle_on_top(ctx);
         }
@@ -839,7 +842,10 @@ impl PlayerApp {
         }
         ui.separator();
         if ui
-            .add(egui::Button::new(menu_label(ic::REPEAT, self.t("A-B 循环", "A-B loop"))).shortcut_text("L"))
+            .add(
+                egui::Button::new(menu_label(ic::REPEAT, self.t("A-B 循环", "A-B loop")))
+                    .shortcut_text(self.sc(crate::keymap::Action::AbLoop)),
+            )
             .clicked()
         {
             ui.close_menu();
@@ -874,12 +880,11 @@ impl PlayerApp {
         self.audio_items(ui);
     }
 
-    pub(super) fn open_menu_items(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let sc = |m: Modifiers, k: Key| ctx.format_shortcut(&egui::KeyboardShortcut::new(m, k));
+    pub(super) fn open_menu_items(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         if ui
             .add(
                 egui::Button::new(menu_label(ic::FOLDER_OPEN, self.t("打开文件…", "Open file…")))
-                    .shortcut_text(sc(Modifiers::COMMAND, Key::O)),
+                    .shortcut_text(self.sc(crate::keymap::Action::Open)),
             )
             .clicked()
         {
@@ -889,7 +894,7 @@ impl PlayerApp {
         if ui
             .add(
                 egui::Button::new(menu_label(ic::FOLDER_PLUS, self.t("打开文件夹…", "Open folder…")))
-                    .shortcut_text(sc(Modifiers::COMMAND | Modifiers::SHIFT, Key::O)),
+                    .shortcut_text(self.sc(crate::keymap::Action::OpenFolder)),
             )
             .clicked()
         {
@@ -899,7 +904,7 @@ impl PlayerApp {
         if ui
             .add(
                 egui::Button::new(menu_label(ic::LINK, self.t("打开网络地址…", "Open URL…")))
-                    .shortcut_text(sc(Modifiers::COMMAND, Key::U)),
+                    .shortcut_text(self.sc(crate::keymap::Action::OpenUrl)),
             )
             .clicked()
         {
@@ -911,7 +916,10 @@ impl PlayerApp {
 
     pub(super) fn info_menu_items(&mut self, ui: &mut egui::Ui) {
         if ui
-            .add(egui::Button::new(menu_label(ic::INFO, self.t("媒体信息", "Media info"))).shortcut_text("Tab"))
+            .add(
+                egui::Button::new(menu_label(ic::INFO, self.t("媒体信息", "Media info")))
+                    .shortcut_text(self.sc(crate::keymap::Action::Info)),
+            )
             .clicked()
         {
             ui.close_menu();
@@ -919,7 +927,8 @@ impl PlayerApp {
         }
         if ui
             .add(
-                egui::Button::new(menu_label(ic::KEYBOARD, self.t("快捷键", "Keyboard shortcuts"))).shortcut_text("F1"),
+                egui::Button::new(menu_label(ic::KEYBOARD, self.t("快捷键", "Keyboard shortcuts")))
+                    .shortcut_text(self.sc(crate::keymap::Action::Shortcuts)),
             )
             .clicked()
         {
@@ -929,113 +938,6 @@ impl PlayerApp {
     }
 
     // ------------------------------------------------------------ keyboard
-
-    /// Runs before the base key handler so modified keys win.
-    pub(super) fn keyboard_extra(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() {
-            return;
-        }
-        let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
-        let none = Modifiers::NONE;
-        let ctrl = Modifiers::COMMAND;
-        let shift = Modifiers::SHIFT;
-        if k(ctrl | shift, Key::O) {
-            self.open_folder_dialog();
-        }
-        if k(ctrl, Key::U) {
-            self.x.show_url = true;
-        }
-        if k(shift, Key::ArrowLeft) {
-            self.seek_rel(-1.0);
-        }
-        if k(shift, Key::ArrowRight) {
-            self.seek_rel(1.0);
-        }
-        if k(ctrl, Key::ArrowLeft) {
-            self.seek_rel(-30.0);
-        }
-        if k(ctrl, Key::ArrowRight) {
-            self.seek_rel(30.0);
-        }
-        if k(ctrl, Key::Minus) {
-            self.cmd(&["add", "audio-delay", "-0.1"]);
-            self.toast(format!("{} {:+.1}s", self.t("音频延迟", "Audio delay"), self.mp_f("audio-delay")));
-        }
-        if k(ctrl, Key::Equals) || k(ctrl, Key::Plus) {
-            self.cmd(&["add", "audio-delay", "0.1"]);
-            self.toast(format!("{} {:+.1}s", self.t("音频延迟", "Audio delay"), self.mp_f("audio-delay")));
-        }
-        if k(none, Key::Period) && !self.casting() {
-            self.cmd(&["frame-step"]);
-        }
-        if k(none, Key::Comma) && !self.casting() {
-            self.cmd(&["frame-back-step"]);
-        }
-        if k(ctrl | shift, Key::E) {
-            self.open_export(true);
-        }
-        if k(ctrl, Key::E) {
-            self.open_export(false);
-        }
-        if k(none, Key::L) {
-            self.ab_loop();
-        }
-        if k(none, Key::P) {
-            self.x.show_playlist = !self.x.show_playlist;
-        }
-        if k(none, Key::R) {
-            self.rotate();
-        }
-        if k(none, Key::T) {
-            self.toggle_on_top(ctx);
-        }
-        if k(none, Key::V) {
-            let vis = self.mp_s("sub-visibility") != "no";
-            self.set("sub-visibility", if vis { "no" } else { "yes" });
-            self.toast(if vis {
-                self.t("字幕：隐藏", "Subtitles hidden")
-            } else {
-                self.t("字幕：显示", "Subtitles shown")
-            });
-        }
-        if k(none, Key::Z) {
-            self.cmd(&["add", "sub-delay", "-0.1"]);
-            self.toast(format!("{} {:+.1}s", self.t("字幕延迟", "Subtitle delay"), self.mp_f("sub-delay")));
-        }
-        if k(none, Key::X) {
-            self.cmd(&["add", "sub-delay", "0.1"]);
-            self.toast(format!("{} {:+.1}s", self.t("字幕延迟", "Subtitle delay"), self.mp_f("sub-delay")));
-        }
-        if k(none, Key::Home) {
-            self.seek_abs(0.0, true);
-        }
-        if k(none, Key::Backspace) {
-            self.set("speed", "1");
-        }
-        if k(none, Key::Tab) {
-            self.x.show_info = !self.x.show_info;
-        }
-        if k(none, Key::F1) {
-            self.x.show_keys = !self.x.show_keys;
-        }
-        let digits = [
-            Key::Num0,
-            Key::Num1,
-            Key::Num2,
-            Key::Num3,
-            Key::Num4,
-            Key::Num5,
-            Key::Num6,
-            Key::Num7,
-            Key::Num8,
-            Key::Num9,
-        ];
-        for (i, d) in digits.iter().enumerate() {
-            if k(none, *d) && self.st.duration > 0.0 {
-                self.seek_abs(self.st.duration * i as f64 / 10.0, false);
-            }
-        }
-    }
 
     // ------------------------------------------------------------ panels / windows
 
@@ -1237,66 +1139,6 @@ impl PlayerApp {
                     });
                 });
             self.x.show_info = open;
-        }
-
-        if self.x.show_keys {
-            let mut open = true;
-            let rows: Vec<(&str, &str)> = vec![
-                ("Space / 单击", self.t("播放 / 暂停", "Play / pause")),
-                ("← / →", self.t("后退 / 前进 5 秒", "Seek 5 s")),
-                ("Shift + ← / →", self.t("后退 / 前进 1 秒", "Seek 1 s")),
-                ("Ctrl + ← / →", self.t("后退 / 前进 30 秒", "Seek 30 s")),
-                ("0 – 9", self.t("跳到 0% – 90%", "Jump to 0–90%")),
-                ("Home", self.t("从头播放", "Restart")),
-                (", / .", self.t("上一帧 / 下一帧", "Frame back / forward")),
-                ("↑ / ↓ / 滚轮", self.t("音量", "Volume")),
-                ("M", self.t("静音", "Mute")),
-                ("[ / ] / Backspace", self.t("减速 / 加速 / 恢复 1.0x", "Slower / faster / reset")),
-                ("PgUp / PgDn", self.t("上一个 / 下一个", "Previous / next")),
-                ("L", self.t("A-B 循环", "A-B loop")),
-                ("P", self.t("播放列表", "Playlist")),
-                ("F / Enter / 双击", self.t("全屏", "Full screen")),
-                ("T", self.t("窗口置顶", "Always on top")),
-                ("R", self.t("旋转画面", "Rotate")),
-                ("Ctrl + 滚轮", self.t("缩放画面", "Zoom")),
-                ("V", self.t("显示 / 隐藏字幕", "Toggle subtitles")),
-                ("Z / X", self.t("字幕延迟 −/+ 0.1 秒", "Subtitle delay ∓0.1 s")),
-                ("Ctrl + − / +", self.t("音频延迟 −/+ 0.1 秒", "Audio delay ∓0.1 s")),
-                ("C", self.t("实时识别翻译字幕", "Live subtitles")),
-                ("S / Shift+S", self.t("截图 / 另一种字幕模式截图", "Snapshot / other subtitle mode")),
-                ("Ctrl + C", self.t("复制当前画面", "Copy frame")),
-                (
-                    "Ctrl + E / Ctrl+Shift+E",
-                    self.t("导出片段 / GIF（默认用 A-B 区间）", "Export clip / GIF (uses A-B range)"),
-                ),
-                ("Ctrl + O", self.t("打开文件", "Open file")),
-                ("Ctrl + Shift + O", self.t("打开文件夹", "Open folder")),
-                ("Ctrl + U", self.t("打开网络地址", "Open URL")),
-                ("Tab", self.t("媒体信息", "Media info")),
-                ("Ctrl + I", self.t("播放统计", "Playback stats")),
-                ("B", self.t("添加书签", "Add bookmark")),
-                ("Shift+B / Ctrl+B", self.t("上一个 / 下一个书签", "Previous / next bookmark")),
-                ("F1", self.t("快捷键", "Shortcuts")),
-                ("Esc", self.t("退出全屏 / 画中画", "Leave full screen / PiP")),
-            ];
-            egui::Window::new(self.t("快捷键", "Keyboard shortcuts"))
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(true)
-                .default_size([460.0, 520.0])
-                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        egui::Grid::new("keys").num_columns(2).spacing([24.0, 8.0]).striped(true).show(ui, |ui| {
-                            for (k, v) in rows {
-                                ui.label(RichText::new(k).monospace().color(ACCENT));
-                                ui.label(v);
-                                ui.end_row();
-                            }
-                        });
-                    });
-                });
-            self.x.show_keys = open;
         }
     }
 

@@ -93,6 +93,8 @@ pub struct Settings {
     pub sub_box_color: [u8; 4],
     /// Apply the style to ASS subtitles too.
     pub sub_force_style: bool,
+    /// Shortcut overrides: action id -> combos ("Ctrl+Shift+O"); missing = default.
+    pub keys: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -137,6 +139,7 @@ impl Default for Settings {
             sub_box: false,
             sub_box_color: [0, 0, 0, 160],
             sub_force_style: false,
+            keys: Default::default(),
         }
     }
 }
