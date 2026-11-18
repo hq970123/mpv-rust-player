@@ -142,6 +142,14 @@ impl Combo {
 
     pub fn parse(s: &str) -> Option<Self> {
         let mut c = Combo { cmd: false, shift: false, alt: false, key: Key::Space };
+        // "Ctrl++" means Ctrl and the plus key
+        let fixed;
+        let s = if s.len() > 1 && s.ends_with("++") {
+            fixed = format!("{}Plus", &s[..s.len() - 1]);
+            fixed.as_str()
+        } else {
+            s
+        };
         let parts: Vec<&str> = s.split('+').map(str::trim).collect();
         let (key, mods) = parts.split_last()?;
         for m in mods {
@@ -152,8 +160,7 @@ impl Combo {
                 _ => return None,
             }
         }
-        // "Ctrl++" splits into an empty last part
-        c.key = if key.is_empty() { Key::Plus } else { Key::from_name(key)? };
+        c.key = Key::from_name(key)?;
         Some(c)
     }
 
